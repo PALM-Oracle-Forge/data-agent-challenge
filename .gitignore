@@ -5,3 +5,6 @@ __pycache__/
 .env
 *.secret
 bin/toolbox
+.env
+*.secret
+bin/toolbox
