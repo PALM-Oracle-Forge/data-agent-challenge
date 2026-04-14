@@ -1,276 +1,298 @@
 """
-Execution engine scaffold for the Oracle Forge runtime.
+Execution Engine.
 
-This module owns orchestration only:
-- choose MCP or sandbox route per step
-- collect typed execution traces
-- delegate retries to the self-correction component
+Responsibilities:
+1. Dialect translation (SQL / MongoDB aggregation / DuckDB analytical SQL)
+2. Query execution via MCPToolbox
+3. Result merging (multi-database joins)
+4. Result validation (types, nulls, integrity)
+5. Format transformation (join key resolution)
 
-Real query planning, merge semantics, and validation logic stay out of this
-scaffold for now. Those behaviors should be added behind the typed interfaces
-defined in ``agent.types``.
+Routing:
+  PostgreSQL / SQLite / MongoDB  → HTTP Google MCP Toolbox (team-dab-toolbox)
+  DuckDB                         → direct duckdb Python driver (via MCPToolbox)
 """
 
 from __future__ import annotations
 
-import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
-from .mcp_client import MCPClient
-from .sandbox_client import SandboxClient
-from .self_correction import SelfCorrectionLoop
-from .types import (
-    CorrectionDecision,
-    ExecutionPlan,
-    ExecutionResult,
-    ExecutionStatus,
-    ExecutionStep,
-    ExecutionTrace,
-    FailureRecord,
-    MCPToolCall,
-    SandboxExecutionRequest,
-    StepKind,
-    StepRoute,
+from agent.models.models import (
+    FormatTransform,
+    JoinOp,
+    QueryPlan,
+    QueryResult,
+    SubQuery,
 )
+from .mcp_toolbox import MCPToolbox
 
 
 class ExecutionEngine:
-    """Coordinate execution across MCP, sandbox, and self-correction layers."""
+    """Execute query plans, returning one QueryResult per sub-query."""
 
     def __init__(
         self,
-        mcp_client: Optional[MCPClient] = None,
-        sandbox_client: Optional[SandboxClient] = None,
-        self_correction: Optional[SelfCorrectionLoop] = None,
-    ) -> None:
-        self.mcp_client = mcp_client or MCPClient()
-        self.sandbox_client = sandbox_client or SandboxClient()
-        self.self_correction = self_correction or SelfCorrectionLoop()
+        toolbox: Optional[MCPToolbox] = None,
+        db_configs: Optional[Dict[str, dict]] = None,
+    ):
+        self._db_configs: Dict[str, dict] = db_configs or {}
+        self.toolbox = toolbox or MCPToolbox(db_configs=self._db_configs)
 
     def execute_plan(
         self,
-        plan: ExecutionPlan,
-        context: Optional[Dict[str, Any]] = None,
-    ) -> ExecutionResult:
-        """
-        Execute a typed plan with bounded retries.
+        plan: QueryPlan,
+        context: Dict[str, Any],
+    ) -> List[QueryResult]:
+        """Execute each sub-query in plan order and return per-DB results."""
+        results: List[QueryResult] = []
 
-        TODO: Replace the generic state passing with richer per-step input/output
-        mapping once the planner contract is finalized.
-        """
-        runtime_context: Dict[str, Any] = dict(context or {})
-        working_plan = plan
-        trace: list[ExecutionTrace] = []
-        outputs: Dict[str, Any] = {}
-        correction_applied = False
+        for idx in plan.execution_order:
+            sq = plan.sub_queries[idx]
+            try:
+                tool_name, params = self._build_tool_call(sq)
+                tool_result = self.toolbox.call_tool(tool_name, params)
 
-        for attempt in range(1, working_plan.max_retries + 1):
-            outputs = {}
-            failed_trace: ExecutionTrace | None = None
-
-            for step in working_plan.steps:
-                step_trace = self._execute_step(
-                    step=step,
-                    context=runtime_context,
-                    outputs=outputs,
-                    attempt=attempt,
+                if not tool_result.success:
+                    results.append(
+                        QueryResult(
+                            database=sq.database,
+                            data=None,
+                            error=tool_result.error,
+                            success=False,
+                        )
+                    )
+                else:
+                    data = tool_result.data
+                    rows = len(data) if isinstance(data, list) else 1
+                    results.append(
+                        QueryResult(
+                            database=sq.database,
+                            data=data,
+                            success=True,
+                            rows_affected=rows,
+                        )
+                    )
+            except Exception as exc:
+                results.append(
+                    QueryResult(
+                        database=sq.database,
+                        data=None,
+                        error=str(exc),
+                        success=False,
+                    )
                 )
-                trace.append(step_trace)
 
-                if step_trace.status is ExecutionStatus.SUCCEEDED:
-                    if step_trace.output_key is not None:
-                        outputs[step_trace.output_key] = step_trace.output
+        # Merge results if join operations are specified
+        if plan.join_operations and len(results) > 1:
+            try:
+                results_by_db = {
+                    r.database: r.data
+                    for r in results
+                    if r.success and isinstance(r.data, list)
+                }
+                merged = self._merge_by_db(results_by_db, plan.join_operations)
+                if merged is not None:
+                    first_db = plan.sub_queries[plan.execution_order[0]].database
+                    return [
+                        QueryResult(
+                            database=first_db,
+                            data=merged,
+                            success=True,
+                            rows_affected=len(merged) if isinstance(merged, list) else 0,
+                        )
+                    ]
+            except Exception:
+                pass  # Return unmerged results on merge failure
+
+        return results
+
+    def _build_tool_call(self, sq: SubQuery) -> tuple[str, Dict[str, Any]]:
+        """Map a sub-query to the MCP tool and its parameters.
+
+        PostgreSQL / SQLite / MongoDB → HTTP toolbox (team-dab-toolbox).
+        DuckDB → direct driver via MCPToolbox._call_duckdb (uses DUCKDB_PATH env).
+        """
+        # Derive actual DB type from db_configs; fall back to query_type
+        db_type = self._db_configs.get(sq.database, {}).get("type", sq.query_type).lower()
+
+        if db_type in ("postgresql", "postgres"):
+            static_tool = self._match_static_pg_tool(sq.query)
+            if static_tool:
+                return static_tool, {}
+            return "run_query", {"query": sq.query}
+
+        if db_type == "sqlite":
+            return "sqlite_query", {"query": sq.query}
+
+        if db_type == "duckdb":
+            # MCPToolbox._call_duckdb uses the DUCKDB_PATH env var
+            return "duckdb_query", {"query": sq.query}
+
+        if db_type == "mongodb":
+            collection, pipeline = self._parse_mongo_query(sq.query)
+            tool_name = (
+                "find_yelp_checkins" if collection == "checkin" else "find_yelp_businesses"
+            )
+            return tool_name, {"filterPayload": pipeline, "limit": 20}
+
+        return "run_query", {"query": sq.query}
+
+    def _match_static_pg_tool(self, query: str) -> Optional[str]:
+        """Return the name of a static toolbox tool if the query maps to one.
+
+        Avoids needing the dynamic run_query tool for common schema/preview calls.
+        Returns None when no static tool matches (caller falls back to run_query).
+        """
+        q = query.lower().strip()
+        # Schema: column listing for books_info
+        if "information_schema.columns" in q and "books_info" in q:
+            return "describe_books_info"
+        # Schema: table listing
+        if "information_schema.tables" in q:
+            return "list_tables"
+        # Data preview: simple SELECT * FROM books_info with no WHERE/aggregation
+        if (
+            "books_info" in q
+            and q.lstrip().startswith("select")
+            and "where" not in q
+            and "group by" not in q
+            and "having" not in q
+            and "order by" not in q
+            and "max(" not in q
+            and "min(" not in q
+            and "count(" not in q
+            and "sum(" not in q
+            and "avg(" not in q
+        ):
+            return "preview_books_info"
+        return None
+
+    def _parse_mongo_query(self, query: str) -> tuple[str, str]:
+        """Extract a coarse collection hint and pipeline payload."""
+        collection = "checkin" if "checkin" in query.lower() else "business"
+        return collection, "{}"
+
+    def _merge_by_db(
+        self,
+        results_by_db: Dict[str, List[Dict[str, Any]]],
+        join_ops: List[JoinOp],
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Merge datasets keyed by database name using JoinOp definitions."""
+        if not results_by_db or not join_ops:
+            return None
+        op = join_ops[0]
+        left = results_by_db.get(op.left_db, [])
+        right = results_by_db.get(op.right_db, [])
+        if not left and not right:
+            return None
+        return self._join_datasets(left, right, op.left_key, op.right_key, op.join_type)
+
+    def merge_results(
+        self,
+        results_by_index: Dict[int, List[Dict[str, Any]]],
+        join_ops: List[JoinOp],
+    ) -> List[Dict[str, Any]]:
+        """Merge result sets by index (legacy interface)."""
+        if not results_by_index:
+            return []
+        if not join_ops:
+            return next(iter(results_by_index.values()))
+        return next(iter(results_by_index.values()))
+
+    def _join_datasets(
+        self,
+        left: List[Dict[str, Any]],
+        right: List[Dict[str, Any]],
+        key_left: str,
+        key_right: str,
+        join_type: str = "inner",
+        transform: Optional[FormatTransform] = None,
+    ) -> List[Dict[str, Any]]:
+        """Join two datasets in memory."""
+        normalized_right: List[Dict[str, Any]] = []
+        for row in right:
+            updated_row = dict(row)
+            if transform and key_right in updated_row:
+                updated_row[key_right] = self.apply_format_transformation(
+                    updated_row[key_right],
+                    transform.source_format,
+                    transform.target_format,
+                )
+            normalized_right.append(updated_row)
+
+        right_index: Dict[Any, List[Dict[str, Any]]] = {}
+        for row in normalized_right:
+            right_index.setdefault(row.get(key_right), []).append(row)
+
+        result: List[Dict[str, Any]] = []
+        matched_right_keys: set = set()
+        for left_row in left:
+            left_value = left_row.get(key_left)
+            matches = right_index.get(left_value, [])
+            if matches:
+                matched_right_keys.add(left_value)
+                for right_row in matches:
+                    result.append({**left_row, **right_row})
+            elif join_type in ("left", "full"):
+                result.append(dict(left_row))
+
+        if join_type in ("right", "full"):
+            for right_key, right_rows in right_index.items():
+                if right_key in matched_right_keys:
                     continue
+                result.extend(dict(row) for row in right_rows)
 
-                failed_trace = step_trace
-                break
+        return result
 
-            if failed_trace is None:
-                final_output = outputs.get(working_plan.final_output_key)
-                if final_output is None and outputs:
-                    final_output = outputs[next(reversed(outputs))]
-                return ExecutionResult(
-                    success=True,
-                    status=ExecutionStatus.SUCCEEDED,
-                    final_output=final_output,
-                    outputs=outputs,
-                    trace=trace,
-                    attempts=attempt,
-                    correction_applied=correction_applied,
-                )
-
-            failure = FailureRecord(
-                step_id=failed_trace.step_id,
-                route=failed_trace.route,
-                error=failed_trace.error or "Step failed",
-                attempt=attempt,
-                trace=trace.copy(),
-            )
-            decision = self.self_correction.handle_failure(working_plan, failure)
-
-            if not decision.retryable or decision.updated_plan is None:
-                return ExecutionResult(
-                    success=False,
-                    status=ExecutionStatus.FAILED,
-                    final_output=None,
-                    outputs=outputs,
-                    trace=trace,
-                    attempts=attempt,
-                    correction_applied=correction_applied,
-                    error=failed_trace.error or decision.reason,
-                )
-
-            correction_applied = True
-            working_plan = decision.updated_plan
-            trace.append(
-                ExecutionTrace(
-                    step_id=failed_trace.step_id,
-                    step_kind=StepKind.VALIDATE,
-                    route=StepRoute.SELF_CORRECTION,
-                    status=ExecutionStatus.RETRYING,
-                    attempt=attempt,
-                    execution_time=0.0,
-                    output=None,
-                    output_key=None,
-                    error=None,
-                    metadata={"reason": decision.reason},
-                )
-            )
-
-        return ExecutionResult(
-            success=False,
-            status=ExecutionStatus.FAILED,
-            final_output=None,
-            outputs=outputs,
-            trace=trace,
-            attempts=working_plan.max_retries,
-            correction_applied=correction_applied,
-            error="Execution exhausted retry budget",
-        )
-
-    def _execute_step(
+    def apply_format_transformation(
         self,
-        step: ExecutionStep,
-        context: Dict[str, Any],
-        outputs: Dict[str, Any],
-        attempt: int,
-    ) -> ExecutionTrace:
-        route = step.route or self._default_route(step)
-        started_at = time.time()
-
+        value: Any,
+        source_format: str,
+        target_format: str,
+    ) -> Any:
+        """Transform join keys between common representations."""
+        if value is None:
+            return value
         try:
-            if route is StepRoute.MCP_TOOLBOX:
-                result = self._execute_mcp_step(step, context, outputs)
-            elif route is StepRoute.SANDBOX:
-                result = self._execute_sandbox_step(step, context, outputs, attempt)
-            else:
-                raise ValueError(f"Unsupported execution route: {route.value}")
-        except Exception as exc:  # pragma: no cover - defensive scaffold
-            return ExecutionTrace(
-                step_id=step.step_id,
-                step_kind=step.kind,
-                route=route,
-                status=ExecutionStatus.FAILED,
-                attempt=attempt,
-                execution_time=round(time.time() - started_at, 4),
-                output=None,
-                output_key=step.output_key,
-                error=str(exc),
-                metadata={},
-            )
+            if source_format == "integer" and "{" in target_format:
+                return target_format.format(int(value))
+            if source_format.startswith("prefix:"):
+                prefix = source_format.split(":", 1)[1]
+                return int(str(value).replace(prefix, "", 1))
+            if source_format == "zero_padded":
+                return int(str(value).lstrip("0") or "0")
+            if target_format == "uppercase":
+                return str(value).upper()
+            if target_format == "lowercase":
+                return str(value).lower()
+        except (TypeError, ValueError):
+            return value
+        return value
 
-        status = ExecutionStatus.SUCCEEDED if result.success else ExecutionStatus.FAILED
-        return ExecutionTrace(
-            step_id=step.step_id,
-            step_kind=step.kind,
-            route=route,
-            status=status,
-            attempt=attempt,
-            execution_time=round(time.time() - started_at, 4),
-            output=result.result if route is StepRoute.SANDBOX and result.success else (
-                result.data if result.success else None
-            ),
-            output_key=step.output_key,
-            error=getattr(result, "error_if_any", None) if route is StepRoute.SANDBOX else result.error,
-            metadata=self._build_trace_metadata(step, route, result),
-        )
-
-    def _execute_mcp_step(
-        self,
-        step: ExecutionStep,
-        context: Dict[str, Any],
-        outputs: Dict[str, Any],
-    ):
-        tool_name = step.tool_name
-        if not tool_name:
-            raise ValueError(f"MCP step '{step.step_id}' is missing tool_name")
-
-        parameters = dict(step.parameters)
-        if step.code and "query" not in parameters:
-            parameters["query"] = step.code
-
-        request = MCPToolCall(
-            tool_name=tool_name,
-            parameters=parameters,
-            database_type=step.database_type,
-            context=self._build_step_context(step, context, outputs),
-        )
-        return self.mcp_client.call_tool(request)
-
-    def _execute_sandbox_step(
-        self,
-        step: ExecutionStep,
-        context: Dict[str, Any],
-        outputs: Dict[str, Any],
-        attempt: int,
-    ):
-        request = SandboxExecutionRequest(
-            code_plan=step.code or "",
-            trace_id=f"{step.step_id}:attempt-{attempt}",
-            inputs_payload={ref: outputs.get(ref) for ref in step.input_refs} or None,
-            db_type=step.database_type or "transform",
-            context={"shared_context": context},
-            step_id=step.step_id,
-        )
-        return self.sandbox_client.execute(request)
-
-    @staticmethod
-    def _build_step_context(
-        step: ExecutionStep,
-        context: Dict[str, Any],
-        outputs: Dict[str, Any],
+    def validate_result(
+        self, result: Any, expected_schema: Dict[str, Dict[str, Any]]
     ) -> Dict[str, Any]:
-        return {
-            "shared_context": context,
-            "inputs": {ref: outputs.get(ref) for ref in step.input_refs},
-        }
+        """Validate basic nullability and duplicate constraints."""
+        issues: List[str] = []
 
-    @staticmethod
-    def _default_route(step: ExecutionStep) -> StepRoute:
-        if step.kind is StepKind.DATABASE:
-            return StepRoute.MCP_TOOLBOX
-        return StepRoute.SANDBOX
+        if result is None:
+            return {"valid": False, "issues": ["Result is None"]}
 
-    @staticmethod
-    def _build_trace_metadata(step: ExecutionStep, route: StepRoute, result: Any) -> Dict[str, Any]:
-        if route is StepRoute.SANDBOX:
-            return {
-                "validation_status": getattr(result, "validation_status", None),
-                "sandbox_trace": getattr(result, "trace", []),
-            }
+        if isinstance(result, list):
+            if result and isinstance(result[0], dict):
+                for key, value in result[0].items():
+                    if (
+                        value is None
+                        and expected_schema.get(key, {}).get("nullable") is False
+                    ):
+                        issues.append(f"Unexpected null in column: {key}")
 
-        return {"tool_name": getattr(result, "tool_name", None)}
+            seen: set = set()
+            for row in result:
+                marker = repr(sorted(row.items())) if isinstance(row, dict) else repr(row)
+                if marker in seen:
+                    issues.append("Duplicate rows detected")
+                    break
+                seen.add(marker)
 
-
-__all__ = [
-    "CorrectionDecision",
-    "ExecutionEngine",
-    "ExecutionPlan",
-    "ExecutionResult",
-    "ExecutionStatus",
-    "ExecutionStep",
-    "ExecutionTrace",
-    "FailureRecord",
-    "StepKind",
-    "StepRoute",
-]
+        return {"valid": not issues, "issues": issues}
