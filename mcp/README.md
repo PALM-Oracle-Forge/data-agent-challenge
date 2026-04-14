@@ -6,8 +6,8 @@ This guide explains how to use the shared MCP Toolbox configuration in this repo
 
 Right now the MCP config supports the shared DAB databases currently running on the team server:
 
-- **PostgreSQL** → `bookreview_db`
-- **MongoDB** → `yelp_db`
+- **PostgreSQL** -> `bookreview_db`
+- **MongoDB** -> `yelp_db`
 
 This is the current working scope. SQLite and DuckDB are not part of this MCP config yet.
 
@@ -16,7 +16,8 @@ This is the current working scope. SQLite and DuckDB are not part of this MCP co
 ## Files
 
 - **Toolbox binary:** `bin/toolbox`
-- **MCP config:** `mcp/tools.yml`
+- **Project wrapper:** `./toolbox`
+- **MCP config:** `mcp/tools.yaml`
 
 ---
 
@@ -49,7 +50,7 @@ This is the current working scope. SQLite and DuckDB are not part of this MCP co
 
 ## Current config
 
-The working config is stored in `mcp/tools.yml`.
+The working config is stored in `mcp/tools.yaml`.
 
 ## How to test in the SSH instance
 
@@ -57,9 +58,22 @@ From the repo root:
 
 ```bash
 cd ~/data-agent-challenge
-## To test try this command
-  ./bin/toolbox invoke --config mcp/tools.yaml list_tables
-  ./bin/toolbox invoke --config mcp/tools.yaml describe_books_info
-  ./bin/toolbox invoke --config mcp/tools.yaml preview_books_info
-  ./bin/toolbox invoke --config mcp/tools.yaml find_yelp_businesses
-  ./bin/toolbox invoke --config mcp/tools.yaml find_yelp_checkins
+
+./toolbox invoke list_tables
+./toolbox invoke describe_books_info
+./toolbox invoke preview_books_info
+./toolbox invoke find_yelp_businesses
+./toolbox invoke find_yelp_checkins
+```
+
+To launch the Toolbox UI against the repo MCP config:
+
+```bash
+./toolbox serve --enable-api --ui
+```
+
+If port `5000` is already in use, launch the UI on `5001` instead:
+
+```bash
+TOOLBOX_URL=http://127.0.0.1:5001 ./toolbox --ui --port 5001
+```

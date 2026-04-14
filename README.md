@@ -8,6 +8,11 @@ The repo now uses a single MCP Toolbox config at `mcp/tools.yaml`.
 - Use `./toolbox` to run the Toolbox CLI with the repo config preloaded
 - Launch the Toolbox UI with `./toolbox serve --enable-api --ui`
 - Configure the server URL with `TOOLBOX_URL` in `.env`
+- For local Docker usage, `./toolbox` defaults to PostgreSQL `127.0.0.1:55432`
+  and MongoDB `127.0.0.1:57017` unless overridden in `.env`
+- If port `5000` is already occupied by Docker or another toolbox process, run
+  the UI on `5001` with
+  `TOOLBOX_URL=http://127.0.0.1:5001 ./toolbox --ui --port 5001`
 - Use `MCPToolbox` from `agent/mcp_toolbox.py` for hybrid routing:
   non-DuckDB tools go through the Toolbox CLI and DuckDB uses a direct driver path
 

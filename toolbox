@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TOOLBOX_BIN="${ROOT_DIR}/bin/toolbox"
 TOOLS_CONFIG="${ROOT_DIR}/mcp/tools.yaml"
+RUNTIME_TOOLS_CONFIG="${TOOLS_CONFIG}"
 
 if [[ -f "${ROOT_DIR}/.env" ]]; then
   # shellcheck disable=SC1091
@@ -36,6 +37,91 @@ if [[ ! -f "${TOOLS_CONFIG}" ]]; then
   exit 1
 fi
 
+PG_HOST="${PG_HOST:-127.0.0.1}"
+PG_PORT="${PG_PORT:-55432}"
+PG_DATABASE="${PG_DATABASE:-bookreview_db}"
+PG_USER="${PG_USER:-postgres}"
+PG_PASSWORD="${PG_PASSWORD:-teampalm}"
+MONGODB_URI="${MONGODB_URI:-${MONGO_URI:-mongodb://127.0.0.1:57017}}"
+
+temp_config="$(mktemp /tmp/toolbox-config.XXXXXX.yaml)"
+trap 'rm -f "${temp_config}"' EXIT
+
+cat > "${temp_config}" <<EOF
+sources:
+  postgres_main:
+    kind: postgres
+    host: ${PG_HOST}
+    port: ${PG_PORT}
+    database: ${PG_DATABASE}
+    user: ${PG_USER}
+    password: ${PG_PASSWORD}
+
+  mongo_main:
+    kind: mongodb
+    uri: ${MONGODB_URI}
+
+tools:
+  list_tables:
+    kind: postgres-sql
+    source: postgres_main
+    description: List all tables in the bookreview database.
+    statement: |
+      SELECT table_schema, table_name
+      FROM information_schema.tables
+      WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
+      ORDER BY table_schema, table_name;
+
+  describe_books_info:
+    kind: postgres-sql
+    source: postgres_main
+    description: Describe columns in the books_info table.
+    statement: |
+      SELECT column_name, data_type
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'books_info'
+      ORDER BY ordinal_position;
+
+  preview_books_info:
+    kind: postgres-sql
+    source: postgres_main
+    description: Preview rows from books_info.
+    statement: |
+      SELECT *
+      FROM books_info
+      LIMIT 10;
+
+  find_yelp_businesses:
+    kind: mongodb-find
+    source: mongo_main
+    database: yelp_db
+    collection: business
+    filterPayload: "{}"
+    limit: 5
+    description: Find documents in the Yelp business collection.
+
+  find_yelp_checkins:
+    kind: mongodb-find
+    source: mongo_main
+    database: yelp_db
+    collection: checkin
+    filterPayload: "{}"
+    limit: 5
+    description: Find documents in the Yelp checkin collection.
+
+toolsets:
+  oracle_forge:
+    tools:
+      - list_tables
+      - describe_books_info
+      - preview_books_info
+      - find_yelp_businesses
+      - find_yelp_checkins
+EOF
+
+RUNTIME_TOOLS_CONFIG="${temp_config}"
+
 forward_args=("$@")
 has_ui=false
 has_enable_api=false
@@ -54,7 +140,7 @@ if [[ "${has_ui}" == true && "${has_enable_api}" == false ]]; then
 fi
 
 exec "${TOOLBOX_BIN}" \
-  --config "${TOOLS_CONFIG}" \
+  --config "${RUNTIME_TOOLS_CONFIG}" \
   --address "${address}" \
   --port "${port}" \
   --toolbox-url "${TOOLBOX_URL}" \
