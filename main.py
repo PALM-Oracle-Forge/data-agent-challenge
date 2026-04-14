@@ -573,6 +573,34 @@ def run_real_runtime_sandbox_demo() -> int:
     return 0 if result.success else 1
 
 
+def run_query_cli(sql: str) -> int:
+    """Execute a SQL query through the MCP toolbox and print the result."""
+    toolbox = MCPToolbox()
+    result = toolbox.call_tool("run_query", {"sql": sql})
+    print(
+        json.dumps(
+            {
+                "tool_name": "run_query",
+                "success": result.success,
+                "source_type": result.source_type,
+                "execution_time": result.execution_time,
+                "error": result.error,
+                "data": result.data,
+            },
+            indent=2,
+        )
+    )
+    return 0 if result.success else 1
+
+
+def list_mcp_tools_cli() -> int:
+    """Print the currently available MCP tool names."""
+    toolbox = MCPToolbox()
+    tools = toolbox.list_tools()
+    print(json.dumps([tool.get("name", tool) for tool in tools], indent=2))
+    return 0
+
+
 def main():
     import sys
 
@@ -589,6 +617,12 @@ def main():
         raise SystemExit(run_runtime_sandbox_demo())
     if command == "real-runtime-sandbox-demo":
         raise SystemExit(run_real_runtime_sandbox_demo())
+    if command == "run-query":
+        if len(sys.argv) < 3:
+            raise SystemExit('Usage: python3 main.py run-query "<SQL>"')
+        raise SystemExit(run_query_cli(sys.argv[2]))
+    if command == "list-mcp-tools":
+        raise SystemExit(list_mcp_tools_cli())
     raise SystemExit(f"Unknown command: {command}")
 
 

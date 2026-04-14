@@ -22,6 +22,18 @@ Quick verification command:
 ./toolbox invoke list_tables
 ```
 
+List the MCP tools currently visible from the running toolbox service:
+
+```bash
+python3 main.py list-mcp-tools
+```
+
+Run a SQL query through the generic PostgreSQL MCP alias:
+
+```bash
+python3 main.py run-query "SELECT 1 AS ok"
+```
+
 ## Runtime Manual
 
 Oracle Forge runtime split:
@@ -50,6 +62,12 @@ SANDBOX_URL=https://sandbox.<your-workers-subdomain>.workers.dev
 ```bash
 ./toolbox invoke preview_books_info
 ./toolbox invoke find_yelp_businesses
+```
+
+You can also test the generic SQL alias through the Python CLI:
+
+```bash
+python3 main.py run-query "SELECT * FROM books_info LIMIT 3"
 ```
 
 ### Verify Sandbox

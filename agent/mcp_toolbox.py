@@ -70,6 +70,7 @@ class MCPToolbox:
         """
         Invoke a named tool. Routes to HTTP toolbox or direct DuckDB driver.
         """
+        parameters = self._normalize_parameters(tool_name, parameters)
         source_type = self._resolve_source_type(tool_name)
         start = time.time()
 
@@ -185,3 +186,12 @@ class MCPToolbox:
         if tool_name in self._tool_source_map:
             return self._tool_source_map[tool_name]
         return self._default_source_map.get(tool_name, "postgres")
+
+    @staticmethod
+    def _normalize_parameters(tool_name: str, parameters: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize legacy parameter names for toolbox tool kinds."""
+        normalized = dict(parameters)
+        if tool_name in {"run_query", "postgres-sql", "postgres-execute-sql"}:
+            if "sql" not in normalized and "query" in normalized:
+                normalized["sql"] = normalized.pop("query")
+        return normalized
