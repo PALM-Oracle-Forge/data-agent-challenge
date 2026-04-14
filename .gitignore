@@ -1,6 +1,9 @@
 .env
 *.secret
 toolbox.log
+duckdb_mcp.log
+duckdb_mcp.pid
+query_bookreview/
 
 # Python
 __pycache__/
