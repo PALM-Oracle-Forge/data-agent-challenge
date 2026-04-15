@@ -26,45 +26,41 @@ from eval.harness import EvaluationHarness
 
 load_dotenv()
 
-# Default database configurations (overridden by env vars)
-_DEFAULT_DB_CONFIGS = {
-    "postgres": {
-        "type": "postgres",
-        "connection_string": os.getenv("POSTGRES_URL", ""),
-    },
-    "mongodb": {
-        "type": "mongodb",
-        "connection_string": os.getenv("MONGODB_URL", ""),
-    },
-    "sqlite": {
-        "type": "sqlite",
-        "path": os.getenv("SQLITE_PATH", ""),
-    },
-    "duckdb": {
-        "type": "duckdb",
-        "path": os.getenv("DUCKDB_PATH", ":memory:"),
-    },
-}
+# DAB datasets that live in MongoDB (served via HTTP toolbox)
+_MONGODB_DATASETS = {"yelp"}
+
+# DAB datasets that live in PostgreSQL (served via HTTP toolbox)
+_POSTGRES_DATASETS = set()
+
+# Root directory where the DAB benchmark mounts dataset files
+_DAB_ROOT = os.getenv("DAB_ROOT", "/DataAgentBench")
 
 
 class OracleForgeAgent:
     """
     Main entry point for the Oracle Forge Data Agent.
 
+    Database configs are keyed by DAB dataset name (e.g. "bookreview", "yelp"),
+    not by DB type.  When no explicit db_configs are supplied the agent
+    auto-discovers the connection for each name in available_databases by:
+      1. Env vars  — BOOKREVIEW_DB_TYPE / BOOKREVIEW_DB_CONN (or _DB_PATH)
+      2. DAB paths — /DataAgentBench/query_<id>/query_dataset/*.db  (SQLite/DuckDB)
+      3. Known sets — _MONGODB_DATASETS / _POSTGRES_DATASETS for HTTP toolbox DBs
+
     Usage:
+        # Auto-discovery (DAB benchmark runner)
         agent = OracleForgeAgent()
         result = agent.answer({
-            "question": "What is the average rating for businesses in Las Vegas?",
-            "available_databases": ["postgres", "mongodb"],
+            "question": "How many 5-star reviews are there?",
+            "available_databases": ["bookreview"],
             "schema_info": {}
         })
 
-        # Or via the typed interface:
-        result = agent.process_query(
-            question="What is the average rating for businesses in Las Vegas?",
-            available_databases=["postgres", "mongodb"],
-            schema_info={},
-        )
+        # Explicit config (scripts, tests)
+        agent = OracleForgeAgent(db_configs={
+            "bookreview": {"type": "sqlite",
+                           "path": "/DataAgentBench/query_bookreview/query_dataset/review_query.db"}
+        })
     """
 
     def __init__(
@@ -73,7 +69,9 @@ class OracleForgeAgent:
         session_id: Optional[str] = None,
     ):
         self._session_id = session_id or str(uuid.uuid4())
-        self._db_configs = db_configs or _DEFAULT_DB_CONFIGS
+        # Explicit configs take priority; discovery runs lazily per-query for any
+        # database not already present (keyed by DAB dataset name, e.g. "bookreview").
+        self._db_configs: Dict[str, dict] = db_configs or {}
         self._client = LLMClient()
 
         # Session state: per-session interaction history (multi-turn support)
@@ -171,6 +169,70 @@ class OracleForgeAgent:
             correction=correction,
         )
 
+    # ── Database discovery ────────────────────────────────────────────────────
+
+    def _discover_db_config(self, db_id: str) -> Optional[Dict[str, Any]]:
+        """
+        Auto-discover connection config for a DAB dataset name.
+
+        Resolution order:
+          1. Env vars  — {DB_ID_UPPER}_DB_TYPE  +  _DB_CONN or _DB_PATH
+          2. DAB paths — scan /DataAgentBench/query_<db_id>/query_dataset/ for .db files
+          3. Known sets — yelp → mongodb, others → postgres via HTTP toolbox
+        """
+        import glob as _glob
+
+        prefix = db_id.upper()
+
+        # 1. Env vars
+        db_type = os.getenv(f"{prefix}_DB_TYPE", "").lower()
+        db_conn = os.getenv(f"{prefix}_DB_CONN", "")
+        db_path = os.getenv(f"{prefix}_DB_PATH", "")
+
+        if db_type in ("sqlite", "duckdb"):
+            path = db_path or db_conn
+            if path:
+                return {"type": db_type, "path": path}
+        elif db_type in ("postgres", "postgresql"):
+            return {"type": "postgres", "connection_string": db_conn or os.getenv("POSTGRES_URL", "")}
+        elif db_type == "mongodb":
+            return {"type": "mongodb", "connection_string": db_conn or os.getenv("MONGODB_URL", "")}
+
+        # 2. Scan known DAB directory structure for local files
+        dataset_dir = os.path.join(_DAB_ROOT, f"query_{db_id}", "query_dataset")
+        if os.path.isdir(dataset_dir):
+            # Prefer DuckDB then SQLite
+            for ext, db_type_name in (("*.duckdb", "duckdb"), ("*.db", "sqlite")):
+                matches = sorted(_glob.glob(os.path.join(dataset_dir, ext)))
+                if matches:
+                    return {"type": db_type_name, "path": matches[0]}
+
+        # 3. Known HTTP-toolbox datasets
+        if db_id in _MONGODB_DATASETS:
+            return {"type": "mongodb", "connection_string": os.getenv("MONGODB_URL", "")}
+        if db_id in _POSTGRES_DATASETS:
+            return {"type": "postgres", "connection_string": os.getenv("POSTGRES_URL", "")}
+
+        return None
+
+    def _resolve_missing_db_configs(self, available_databases: List[str]) -> None:
+        """
+        Fill in self._db_configs for any database not yet configured.
+        Propagates new configs to the engine and toolbox so routing works.
+        """
+        new_entries: Dict[str, dict] = {}
+        for db_id in available_databases:
+            if db_id not in self._db_configs:
+                cfg = self._discover_db_config(db_id)
+                if cfg:
+                    new_entries[db_id] = cfg
+
+        if new_entries:
+            self._db_configs.update(new_entries)
+            # Keep engine and toolbox in sync
+            self._engine._db_configs.update(new_entries)
+            self._engine.toolbox._db_configs.update(new_entries)
+
     # ── DAB wire-format interface ──────────────────────────────────────────────
 
     def answer(self, dab_input: Dict[str, Any]) -> Dict[str, Any]:
@@ -184,7 +246,10 @@ class OracleForgeAgent:
             {"answer": Any, "query_trace": List[dict], "confidence": float}
         """
         question = dab_input["question"]
-        available_databases = dab_input.get("available_databases", list(self._db_configs.keys()))
+        available_databases = dab_input.get("available_databases") or list(self._db_configs.keys())
+
+        # Auto-discover connection configs for any unknown dataset names
+        self._resolve_missing_db_configs(available_databases)
 
         # Layer 3: check for proactive corrections before first attempt
         context = self._ctx_manager.get_bundle()
@@ -395,6 +460,20 @@ class OracleForgeAgent:
             )
         return trace
 
+    def end_session(self) -> None:
+        """
+        autoDream consolidation — call after all queries in a session are done.
+
+        Implements the DreamTask pattern from kb/architecture/memory_system.md:
+          1. Prune exact-duplicate corrections (same query + failure + fix)
+          2. Keep recurring failures and high-impact join fixes
+          3. A log that only grows becomes noise — discipline is removal
+
+        The pruned log is written back to kb/corrections/corrections_log.md
+        and the in-memory bundle is updated.
+        """
+        self._ctx_manager.auto_dream()
+
     def get_harness(self) -> EvaluationHarness:
         """Return the evaluation harness for external callers (e.g. run_benchmark)."""
         return self._harness
@@ -414,8 +493,8 @@ def main() -> None:
     parser.add_argument(
         "--databases",
         nargs="+",
-        default=["postgres"],
-        help="Available database IDs",
+        default=[],
+        help="Available database IDs (DAB dataset names, e.g. bookreview yelp)",
     )
     parser.add_argument("--output", default=None, help="Output JSON file path")
     args = parser.parse_args()
