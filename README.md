@@ -61,7 +61,7 @@ Set these in `.env` when available:
 ```env
 TOOLBOX_URL=http://127.0.0.1:5000
 DAB_DATASET_ROOT=/home/<your-user>/DataAgentBench
-SANDBOX_URL=https://sandbox.<your-workers-subdomain>.workers.dev
+SANDBOX_URL=https://data-agent-challenge-sandbox.mdwithgod.workers.dev
 ```
 
 `./setup_dab.sh` now starts the toolbox in Docker, mounts the repo at
@@ -93,6 +93,45 @@ python3 main.py run-query "SELECT * FROM books_info LIMIT 3"
 ```bash
 curl -sS "$SANDBOX_URL/health"
 ```
+
+### Sandbox Contract
+
+Sandbox-bound steps use a typed request/response contract.
+
+Request payload:
+
+```json
+{
+  "code_plan": "string",
+  "trace_id": "step-id:attempt-n",
+  "inputs_payload": {
+    "ref_name": "value from prior step output or null"
+  },
+  "db_type": "extract|transform|merge|validate",
+  "context": {
+    "shared_context": {},
+    "step_parameters": {},
+    "available_outputs": {}
+  },
+  "step_id": "string"
+}
+```
+
+Response payload:
+
+```json
+{
+  "result": {},
+  "trace": [],
+  "validation_status": "PASSED|FAILED|TIMEOUT|...",
+  "error_if_any": null
+}
+```
+
+The engine keeps this contract explicit in `agent/types.py`, routes
+`extract` / `transform` / `merge` / `validate` steps through
+`agent/sandbox_client.py`, and triggers self-correction retries when the
+sandbox returns a failed validation or execution error.
 
 ### Demo Commands
 

@@ -26,6 +26,25 @@ class FakeResponse:
 
 
 class SandboxClientTests(unittest.TestCase):
+    def test_validate_falls_back_to_backend_execute_when_validate_missing(self) -> None:
+        class ExecuteOnlyBackend:
+            def execute(self, request):
+                return {
+                    "result": {"validated": True},
+                    "trace": [{"step": "validate"}],
+                    "validation_status": "PASSED",
+                    "error_if_any": None,
+                }
+
+        client = SandboxClient(backend=ExecuteOnlyBackend())
+        request = SandboxExecutionRequest(code_plan="validate rows", trace_id="trace-0")
+
+        result = client.validate(request)
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.result, {"validated": True})
+        self.assertEqual(result.validation_status, "PASSED")
+
     def test_execute_normalizes_http_sandbox_response(self) -> None:
         client = SandboxClient(base_url="http://sandbox.local", timeout_seconds=3)
         request = SandboxExecutionRequest(
