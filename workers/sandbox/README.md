@@ -147,21 +147,19 @@ Expected result:
 
 ## Verify Sandbox Execution
 
-Test a transform-style sandbox call:
+Test an extraction-style sandbox call:
 
 ```bash
 curl -sS "$SANDBOX_URL/execute" \
   -H 'Content-Type: application/json' \
   -d '{
-    "code_plan": "return (inputs.rows ?? []).map((row) => ({ ...row, normalized: true }));",
-    "trace_id": "manual-transform-check",
-    "db_type": "transform",
+    "code_plan": "{\"operation\":\"keyword_sentiment\",\"input_ref\":\"review\",\"text_field\":\"text\",\"output_mode\":\"record\"}",
+    "trace_id": "manual-extract-check",
+    "db_type": "extract",
     "inputs_payload": {
-      "rows": [
-        { "id": 1, "name": "Ada" }
-      ]
+      "review": { "text": "This book is amazing, loved every page" }
     },
-    "step_id": "manual-transform"
+    "step_id": "manual-extract"
   }'
 ```
 
@@ -169,11 +167,32 @@ Expected shape:
 
 ```json
 {
-  "result": [...],
+  "result": {
+    "sentiment": "positive",
+    "text": "This book is amazing, loved every page",
+    "source": "review"
+  },
   "trace": [...],
   "validation_status": "PASSED",
   "error_if_any": null
 }
+```
+
+Test a merge-style sandbox call:
+
+```bash
+curl -sS "$SANDBOX_URL/execute" \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "code_plan": "{\"operation\":\"merge_on_key\",\"left_input\":\"postgres_rows\",\"right_input\":\"mongo_docs\",\"left_key\":\"business_id\",\"right_key\":\"business_id\",\"join_type\":\"inner\",\"require_repaired\":false,\"repaired\":true}",
+    "trace_id": "manual-merge-check",
+    "db_type": "merge",
+    "inputs_payload": {
+      "postgres_rows": [{ "business_id": "b1", "title": "Cafe Blue" }],
+      "mongo_docs": [{ "business_id": "b1", "category": "Cafe" }]
+    },
+    "step_id": "manual-merge"
+  }'
 ```
 
 ## Verify Runtime Integration
