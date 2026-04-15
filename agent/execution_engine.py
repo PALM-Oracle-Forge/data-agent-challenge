@@ -1,23 +1,36 @@
 """
 Execution Engine.
 
-Responsibilities:
-1. Dialect translation (SQL / MongoDB aggregation / DuckDB analytical SQL)
-2. Query execution via MCP services
-3. Result merging (multi-database joins)
-4. Result validation (types, nulls, integrity)
-5. Format transformation (join key resolution)
+Supports two execution contracts:
+1. Legacy query-plan execution used by the current Oracle Forge agent
+2. Typed runtime execution used for sandbox-aware transform / extract / merge / validate steps
 
 Routing:
-  PostgreSQL / SQLite / MongoDB  → HTTP Google MCP Toolbox (team-dab-toolbox)
-  DuckDB                         → HTTP custom DuckDB MCP service
+  PostgreSQL / SQLite / MongoDB  -> HTTP Google MCP Toolbox
+  DuckDB                         -> HTTP custom DuckDB MCP service
+  Extract / Transform / Merge / Validate -> Sandbox
 """
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Any, Dict, List, Optional
 
+from agent.mcp_client import MCPClient
+from agent.sandbox_client import SandboxClient
+from agent.types import (
+    CorrectionDecision,
+    ExecutionPlan as TypedExecutionPlan,
+    ExecutionResult,
+    ExecutionStatus,
+    ExecutionStep,
+    ExecutionTrace,
+    FailureRecord,
+    MCPToolCall,
+    StepKind,
+    StepRoute,
+)
 from agent.models.models import (
     FormatTransform,
     JoinOp,
@@ -46,9 +59,8 @@ class ExecutionEngine:
         self,
         toolbox: Optional[MCPToolbox] = None,
         db_configs: Optional[Dict[str, dict]] = None,
-        # Typed scaffold parameters
-        mcp_client: Optional[Any] = None,
-        sandbox_client: Optional[Any] = None,
+        mcp_client: Optional[MCPClient] = None,
+        sandbox_client: Optional[SandboxClient] = None,
         self_correction: Optional[Any] = None,
     ):
         # Legacy interface
@@ -303,7 +315,6 @@ class ExecutionEngine:
                     )
                 )
 
-        # Merge results if join operations are specified
         if plan.join_operations and len(results) > 1:
             try:
                 results_by_db = {
@@ -323,7 +334,7 @@ class ExecutionEngine:
                         )
                     ]
             except Exception:
-                pass  # Return unmerged results on merge failure
+                pass
 
         return results
 
@@ -358,53 +369,56 @@ class ExecutionEngine:
     }
 
     def _build_tool_call(self, sq: SubQuery) -> tuple[str, Dict[str, Any]]:
-        """Map a sub-query to the MCP tool and its parameters.
-
-        PostgreSQL / SQLite / MongoDB → HTTP toolbox (team-dab-toolbox).
-        DuckDB → HTTP custom DuckDB MCP service.
-        """
-        # Derive actual DB type from db_configs; fall back to query_type
+        """Map a sub-query to the MCP tool and its parameters."""
         db_type = self._db_configs.get(sq.database, {}).get("type", sq.query_type).lower()
+        normalized_query = self._normalize_query_text(sq.query)
 
         if db_type in ("postgresql", "postgres"):
-            static_tool = self._match_static_pg_tool(sq.query)
+            static_tool = self._match_static_pg_tool(normalized_query)
             if static_tool:
                 return static_tool, {}
             # Route to the per-database tool; fall back to run_query (bookreview default)
             pg_tool = self._PG_TOOL_MAP.get(sq.database, "run_query")
-            return pg_tool, {"query": sq.query}
+            return pg_tool, {"query": normalized_query}
 
         if db_type == "sqlite":
             sqlite_tool = self._db_configs.get(sq.database, {}).get("mcp_tool", "sqlite_query")
-            return sqlite_tool, {"sql": sq.query}
+            return sqlite_tool, {"sql": normalized_query}
 
         if db_type == "duckdb":
             duckdb_tool = self._db_configs.get(sq.database, {}).get("mcp_tool", "duckdb_query")
-            return duckdb_tool, {"sql": sq.query}
+            return duckdb_tool, {"sql": normalized_query}
 
         if db_type == "mongodb":
-            collection, pipeline = self._parse_mongo_query(sq.query)
-            tool_name = (
-                "find_yelp_checkins" if collection == "checkin" else "find_yelp_businesses"
-            )
+            collection, pipeline = self._parse_mongo_query(normalized_query)
+            tool_name = "find_yelp_checkins" if collection == "checkin" else "find_yelp_businesses"
             return tool_name, {"filterPayload": pipeline, "limit": 20}
 
-        return "run_query", {"query": sq.query}
+        return "run_query", {"query": normalized_query}
+
+    @staticmethod
+    def _normalize_query_text(query: str) -> str:
+        """Strip common markdown wrappers that LLMs add around query text."""
+        cleaned = query.strip()
+        if cleaned.startswith("```") and cleaned.endswith("```"):
+            lines = cleaned.splitlines()
+            if lines:
+                first = lines[0].strip()
+                last = lines[-1].strip()
+                if first.startswith("```") and last == "```":
+                    inner_lines = lines[1:-1]
+                    cleaned = "\n".join(inner_lines).strip()
+        if cleaned.lower().startswith("sql\n"):
+            cleaned = cleaned[4:].lstrip()
+        cleaned = re.sub(r"\\+'", "''", cleaned)
+        return cleaned
 
     def _match_static_pg_tool(self, query: str) -> Optional[str]:
-        """Return the name of a static toolbox tool if the query maps to one.
-
-        Avoids needing the dynamic run_query tool for common schema/preview calls.
-        Returns None when no static tool matches (caller falls back to run_query).
-        """
         q = query.lower().strip()
-        # Schema: column listing for books_info
         if "information_schema.columns" in q and "books_info" in q:
             return "describe_books_info"
-        # Schema: table listing
         if "information_schema.tables" in q:
             return "list_tables"
-        # Data preview: simple SELECT * FROM books_info with no WHERE/aggregation
         if (
             "books_info" in q
             and q.lstrip().startswith("select")
@@ -471,7 +485,6 @@ class ExecutionEngine:
         results_by_db: Dict[str, List[Dict[str, Any]]],
         join_ops: List[JoinOp],
     ) -> Optional[List[Dict[str, Any]]]:
-        """Merge datasets keyed by database name using JoinOp definitions."""
         if not results_by_db or not join_ops:
             return None
         op = join_ops[0]
@@ -486,7 +499,6 @@ class ExecutionEngine:
         results_by_index: Dict[int, List[Dict[str, Any]]],
         join_ops: List[JoinOp],
     ) -> List[Dict[str, Any]]:
-        """Merge result sets by index (legacy interface)."""
         if not results_by_index:
             return []
         if not join_ops:
@@ -502,7 +514,6 @@ class ExecutionEngine:
         join_type: str = "inner",
         transform: Optional[FormatTransform] = None,
     ) -> List[Dict[str, Any]]:
-        """Join two datasets in memory."""
         normalized_right: List[Dict[str, Any]] = []
         for row in right:
             updated_row = dict(row)
@@ -544,7 +555,6 @@ class ExecutionEngine:
         source_format: str,
         target_format: str,
     ) -> Any:
-        """Transform join keys between common representations."""
         if value is None:
             return value
         try:
@@ -566,7 +576,6 @@ class ExecutionEngine:
     def validate_result(
         self, result: Any, expected_schema: Dict[str, Dict[str, Any]]
     ) -> Dict[str, Any]:
-        """Validate basic nullability and duplicate constraints."""
         issues: List[str] = []
 
         if result is None:
@@ -575,10 +584,7 @@ class ExecutionEngine:
         if isinstance(result, list):
             if result and isinstance(result[0], dict):
                 for key, value in result[0].items():
-                    if (
-                        value is None
-                        and expected_schema.get(key, {}).get("nullable") is False
-                    ):
+                    if value is None and expected_schema.get(key, {}).get("nullable") is False:
                         issues.append(f"Unexpected null in column: {key}")
 
             seen: set = set()
