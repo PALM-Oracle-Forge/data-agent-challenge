@@ -49,6 +49,38 @@ def test_build_tool_call_routes_sqlite_and_mongodb():
     assert mongo_params["limit"] == 20
 
 
+def test_build_tool_call_strips_markdown_sql_fences():
+    engine = ExecutionEngine(toolbox=StubToolbox([]))
+
+    tool_name, params = engine._build_tool_call(
+        SubQuery(
+            database="catalog",
+            query="```sql\nSELECT *\nFROM books_info\nLIMIT 5;\n```",
+            query_type="postgres",
+        )
+    )
+
+    assert tool_name == "preview_books_info"
+    assert params == {}
+
+
+def test_build_tool_call_normalizes_sql_apostrophe_escaping():
+    engine = ExecutionEngine(toolbox=StubToolbox([]))
+
+    tool_name, params = engine._build_tool_call(
+        SubQuery(
+            database="catalog",
+            query="SELECT * FROM books_info WHERE categories LIKE '%\"Children\\'s Books\"%';",
+            query_type="postgres",
+        )
+    )
+
+    assert tool_name == "run_query"
+    assert params == {
+        "query": "SELECT * FROM books_info WHERE categories LIKE '%\"Children''s Books\"%';"
+    }
+
+
 def test_build_tool_call_uses_sqlite_mcp_tool_override():
     engine = ExecutionEngine(
         toolbox=StubToolbox([]),

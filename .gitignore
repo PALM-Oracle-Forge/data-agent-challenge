@@ -19,3 +19,6 @@ bin/toolbox
 .hypothesis/
 CLAUDE.md
 ut/
+eval/trace_log.jsonl
+my_query_run/
+query_bookreview_benchmark/

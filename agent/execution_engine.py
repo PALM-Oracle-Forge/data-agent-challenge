@@ -395,27 +395,45 @@ class ExecutionEngine:
     def _build_tool_call(self, sq: SubQuery) -> tuple[str, Dict[str, Any]]:
         """Map a sub-query to the MCP tool and its parameters."""
         db_type = self._db_configs.get(sq.database, {}).get("type", sq.query_type).lower()
+        normalized_query = self._normalize_query_text(sq.query)
 
         if db_type in ("postgresql", "postgres"):
-            static_tool = self._match_static_pg_tool(sq.query)
+            static_tool = self._match_static_pg_tool(normalized_query)
             if static_tool:
                 return static_tool, {}
-            return "run_query", {"query": sq.query}
+            return "run_query", {"query": normalized_query}
 
         if db_type == "sqlite":
             sqlite_tool = self._db_configs.get(sq.database, {}).get("mcp_tool", "sqlite_query")
-            return sqlite_tool, {"sql": sq.query}
+            return sqlite_tool, {"sql": normalized_query}
 
         if db_type == "duckdb":
             duckdb_tool = self._db_configs.get(sq.database, {}).get("mcp_tool", "duckdb_query")
-            return duckdb_tool, {"sql": sq.query}
+            return duckdb_tool, {"sql": normalized_query}
 
         if db_type == "mongodb":
-            collection, pipeline = self._parse_mongo_query(sq.query)
+            collection, pipeline = self._parse_mongo_query(normalized_query)
             tool_name = "find_yelp_checkins" if collection == "checkin" else "find_yelp_businesses"
             return tool_name, {"filterPayload": pipeline, "limit": 20}
 
-        return "run_query", {"query": sq.query}
+        return "run_query", {"query": normalized_query}
+
+    @staticmethod
+    def _normalize_query_text(query: str) -> str:
+        """Strip common markdown wrappers that LLMs add around query text."""
+        cleaned = query.strip()
+        if cleaned.startswith("```") and cleaned.endswith("```"):
+            lines = cleaned.splitlines()
+            if lines:
+                first = lines[0].strip()
+                last = lines[-1].strip()
+                if first.startswith("```") and last == "```":
+                    inner_lines = lines[1:-1]
+                    cleaned = "\n".join(inner_lines).strip()
+        if cleaned.lower().startswith("sql\n"):
+            cleaned = cleaned[4:].lstrip()
+        cleaned = cleaned.replace("\\'", "''")
+        return cleaned
 
     def _match_static_pg_tool(self, query: str) -> Optional[str]:
         q = query.lower().strip()
