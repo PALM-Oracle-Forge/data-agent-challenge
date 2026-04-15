@@ -56,6 +56,7 @@ Or place them in `.env`:
 DAB_DATASET_ROOT=/home/<your-user>/DataAgentBench
 TOOLBOX_URL=http://127.0.0.1:5000
 DUCKDB_MCP_URL=http://127.0.0.1:8001
+SANDBOX_URL=https://data-agent-challenge-sandbox.mdwithgod.workers.dev
 ```
 
 ## Startup
@@ -74,6 +75,65 @@ What startup does:
 - mounts `${DAB_DATASET_ROOT}` into the container at `/datasets`
 - starts the custom DuckDB MCP service locally
 - health-checks both MCP endpoints
+
+## Sandbox Runtime
+
+The Oracle Forge runtime uses the deployed sandbox at:
+
+- `https://data-agent-challenge-sandbox.mdwithgod.workers.dev`
+
+Execution routing:
+
+- `database` steps -> MCP
+- `extract` steps -> sandbox
+- `transform` steps -> sandbox
+- `merge` steps -> sandbox
+- `validate` steps -> sandbox
+
+When a sandbox call fails or returns a failed validation status, the execution
+engine emits trace metadata for that call and passes the failure into the
+self-correction loop for retry / repair.
+
+### Sandbox Payload Schema
+
+Request body sent by `agent/sandbox_client.py`:
+
+```json
+{
+  "code_plan": "string",
+  "trace_id": "step-id:attempt-n",
+  "inputs_payload": {
+    "input_ref": "value from prior step output or null"
+  },
+  "db_type": "extract|transform|merge|validate",
+  "context": {
+    "shared_context": {},
+    "step_parameters": {},
+    "available_outputs": {}
+  },
+  "step_id": "string"
+}
+```
+
+Response body expected back from the sandbox:
+
+```json
+{
+  "result": {},
+  "trace": [],
+  "validation_status": "PASSED|FAILED|TIMEOUT|...",
+  "error_if_any": null
+}
+```
+
+Why this shape:
+
+- `code_plan` keeps the executable step explicit
+- `trace_id` makes retries observable and deterministic
+- `inputs_payload` passes only prior step outputs by declared reference
+- `context.shared_context` keeps original request context available without
+  hiding where sandbox inputs came from
+- `validation_status` gives the engine a typed retry signal separate from raw errors
 
 ## Browser Access
 

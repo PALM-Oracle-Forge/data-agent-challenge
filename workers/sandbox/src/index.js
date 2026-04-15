@@ -16,7 +16,7 @@ const DB_TIMEOUT_MS = 10000;
  *
  * Request shape for /execute:
  *   {
- *     code_plan: string,
+ *     code_plan: string, // JSON-encoded structured operation for transform/extract/merge/validate
  *     trace_id: string,
  *     inputs_payload?: object,
  *     db_type?: string,
@@ -75,7 +75,7 @@ export default {
 // POST /execute
 // ---------------------------------------------------------------------------
 // Body: {
-//   code_plan:      string   — JS transformation code or SQL/MongoDB query
+//   code_plan:      string   — structured JSON operation or SQL/MongoDB query
 //   trace_id:       string   — correlation id
 //   inputs_payload: object   — optional explicit step inputs
 //   db_type:        string   — "javascript" | "transform" | "extract" |
@@ -135,7 +135,11 @@ async function handleExecute(request, env) {
   try {
     let result;
 
-    if (['javascript', 'transform', 'extract', 'merge', 'validate'].includes(db_type)) {
+    if (['transform', 'extract', 'merge', 'validate'].includes(db_type)) {
+      addTrace('EXECUTE_START', { engine: 'structured_operation' });
+      result = executeStructuredOperation(code_plan, db_type, context, inputs_payload, trace_id);
+      addTrace('EXECUTE_DONE');
+    } else if (db_type === 'javascript') {
       addTrace('EXECUTE_START', { engine: 'javascript' });
       result = executeJavaScript(code_plan, context, inputs_payload, trace_id);
       addTrace('EXECUTE_DONE');
@@ -207,13 +211,20 @@ async function handleValidate(request, env) {
   const safety = validateSafety(code_plan, db_type);
   if (!safety.safe) return Response.json({ valid: false, error: safety.reason });
 
-  if (['javascript', 'transform', 'extract', 'merge', 'validate'].includes(db_type)) {
-    try {
-      new Function(code_plan); // parse-only, no execution
-      return Response.json({ valid: true });
-    } catch (err) {
-      return Response.json({ valid: false, error: err.message });
+  if (['transform', 'extract', 'merge', 'validate'].includes(db_type)) {
+    const parsed = parseStructuredOperation(code_plan);
+    if (!parsed.ok) {
+      return Response.json({ valid: false, error: parsed.error });
     }
+    const validation = validateStructuredOperation(parsed.value, db_type);
+    return Response.json({ valid: validation.valid, error: validation.error ?? null });
+  }
+
+  if (db_type === 'javascript') {
+    return Response.json({
+      valid: false,
+      error: 'Arbitrary JavaScript execution is not supported on Cloudflare Workers; use a structured operation.',
+    });
   }
 
   const syntax = validateQuerySyntax(code_plan, db_type);
@@ -362,6 +373,195 @@ function executeJavaScript(code, context, inputsPayload, traceId) {
 
   const fn = new Function(...Object.keys(safeGlobals), `"use strict";\n${code}`);
   return fn(...Object.values(safeGlobals));
+}
+
+function executeStructuredOperation(codePlan, dbType, context, inputsPayload, traceId) {
+  const parsed = parseStructuredOperation(codePlan);
+  if (!parsed.ok) {
+    throw new Error(parsed.error);
+  }
+
+  const validation = validateStructuredOperation(parsed.value, dbType);
+  if (!validation.valid) {
+    throw new Error(validation.error);
+  }
+
+  const operation = parsed.value;
+  switch (operation.operation) {
+    case 'merge_on_key':
+      return executeMergeOnKey(operation, inputsPayload);
+    case 'keyword_sentiment':
+      return executeKeywordSentiment(operation, inputsPayload);
+    case 'regex_extract':
+      return executeRegexExtract(operation, inputsPayload);
+    case 'validate_non_empty':
+      return executeValidateNonEmpty(operation, inputsPayload);
+    default:
+      throw new Error(`Unsupported structured operation: ${operation.operation}`);
+  }
+}
+
+function parseStructuredOperation(codePlan) {
+  try {
+    const parsed = JSON.parse(codePlan);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      return { ok: false, error: 'Structured sandbox code_plan must be a JSON object' };
+    }
+    return { ok: true, value: parsed };
+  } catch (err) {
+    return { ok: false, error: `Structured sandbox code_plan must be valid JSON: ${err.message}` };
+  }
+}
+
+function validateStructuredOperation(operation, dbType) {
+  if (!operation.operation || typeof operation.operation !== 'string') {
+    return { valid: false, error: 'Structured operation must include a string "operation" field' };
+  }
+
+  if (dbType === 'merge' && operation.operation !== 'merge_on_key') {
+    return { valid: false, error: 'merge steps must use the merge_on_key operation' };
+  }
+  if (dbType === 'extract' && !['keyword_sentiment', 'regex_extract'].includes(operation.operation)) {
+    return { valid: false, error: 'extract steps must use keyword_sentiment or regex_extract' };
+  }
+  if (dbType === 'validate' && operation.operation !== 'validate_non_empty') {
+    return { valid: false, error: 'validate steps must use the validate_non_empty operation' };
+  }
+
+  return { valid: true };
+}
+
+function executeMergeOnKey(operation, inputsPayload) {
+  const leftRows = resolveInputRows(inputsPayload, operation.left_input);
+  const rightRows = resolveInputRows(inputsPayload, operation.right_input);
+  const leftKey = operation.left_key;
+  const rightKey = operation.right_key;
+  const joinType = operation.join_type || 'inner';
+  const repaired = operation.repaired === true;
+
+  if (!leftKey || !rightKey) {
+    throw new Error('merge_on_key requires left_key and right_key');
+  }
+  if (operation.require_repaired && !repaired) {
+    throw new Error('normalization failed');
+  }
+
+  const rightIndex = new Map();
+  for (const row of rightRows) {
+    const key = row?.[rightKey];
+    if (!rightIndex.has(key)) {
+      rightIndex.set(key, []);
+    }
+    rightIndex.get(key).push(row);
+  }
+
+  const joined = [];
+  const matchedRightKeys = new Set();
+  for (const leftRow of leftRows) {
+    const leftValue = leftRow?.[leftKey];
+    const matches = rightIndex.get(leftValue) || [];
+    if (matches.length > 0) {
+      matchedRightKeys.add(leftValue);
+      for (const rightRow of matches) {
+        joined.push({ ...leftRow, ...rightRow, ...(repaired ? { repaired: true } : {}) });
+      }
+    } else if (joinType === 'left' || joinType === 'full') {
+      joined.push({ ...leftRow, ...(repaired ? { repaired: true } : {}) });
+    }
+  }
+
+  if (joinType === 'right' || joinType === 'full') {
+    for (const [key, rows] of rightIndex.entries()) {
+      if (matchedRightKeys.has(key)) continue;
+      for (const row of rows) {
+        joined.push({ ...row, ...(repaired ? { repaired: true } : {}) });
+      }
+    }
+  }
+
+  return joined;
+}
+
+function executeKeywordSentiment(operation, inputsPayload) {
+  const text = resolveInputText(inputsPayload, operation.input_ref, operation.text_field);
+  const normalized = text.toLowerCase();
+  const positiveTerms = Array.isArray(operation.positive_terms) && operation.positive_terms.length
+    ? operation.positive_terms
+    : ['great', 'excellent', 'love', 'amazing', 'perfect'];
+  const negativeTerms = Array.isArray(operation.negative_terms) && operation.negative_terms.length
+    ? operation.negative_terms
+    : ['terrible', 'awful', 'hate', 'worst', 'broken'];
+
+  const sentiment = positiveTerms.some((term) => normalized.includes(String(term).toLowerCase()))
+    ? 'positive'
+    : negativeTerms.some((term) => normalized.includes(String(term).toLowerCase()))
+      ? 'negative'
+      : 'neutral';
+
+  if (operation.output_mode === 'record') {
+    return {
+      sentiment,
+      text,
+      source: operation.input_ref || null,
+    };
+  }
+
+  return sentiment;
+}
+
+function executeRegexExtract(operation, inputsPayload) {
+  const text = resolveInputText(inputsPayload, operation.input_ref, operation.text_field);
+  const pattern = operation.pattern;
+  if (!pattern || typeof pattern !== 'string') {
+    throw new Error('regex_extract requires a string pattern');
+  }
+
+  const flags = typeof operation.flags === 'string' ? operation.flags : '';
+  const regex = new RegExp(pattern, flags);
+  const match = text.match(regex);
+  if (!match) {
+    return operation.output_mode === 'record' ? { matched: false, value: null } : null;
+  }
+
+  if (Array.isArray(operation.group_names) && operation.group_names.length > 0) {
+    const extracted = {};
+    for (let i = 0; i < operation.group_names.length; i += 1) {
+      extracted[operation.group_names[i]] = match[i + 1] ?? null;
+    }
+    return extracted;
+  }
+
+  return match[1] ?? match[0];
+}
+
+function executeValidateNonEmpty(operation, inputsPayload) {
+  const values = resolveInputRows(inputsPayload, operation.input_ref);
+  if (!Array.isArray(values) || values.length === 0) {
+    throw new Error(operation.message || 'validation failed: expected non-empty input');
+  }
+  return {
+    ok: true,
+    count: values.length,
+  };
+}
+
+function resolveInputRows(inputsPayload, refName) {
+  if (!refName) {
+    throw new Error('Structured operation is missing required input reference');
+  }
+  const value = inputsPayload?.[refName];
+  return Array.isArray(value) ? value : [];
+}
+
+function resolveInputText(inputsPayload, inputRef, textField) {
+  const source = inputsPayload?.[inputRef];
+  if (typeof source === 'string') {
+    return source;
+  }
+  if (source && typeof source === 'object' && textField && typeof source[textField] === 'string') {
+    return source[textField];
+  }
+  throw new Error('Structured extraction operation could not resolve input text');
 }
 
 // ---------------------------------------------------------------------------

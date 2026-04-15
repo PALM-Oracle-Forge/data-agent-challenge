@@ -76,7 +76,8 @@ class RuntimeDemoSandboxBackend:
     def execute(self, request) -> SandboxResult:
         self.calls.append(request)
 
-        if "repaired: true" not in request.code_plan:
+        operation = json.loads(request.code_plan)
+        if not operation.get("repaired"):
             return SandboxResult(
                 success=False,
                 result=None,
@@ -123,13 +124,17 @@ class RuntimeDemoCorrection(SelfCorrectionLoop):
                         route=step.route,
                         tool_name=step.tool_name,
                         database_type=step.database_type,
-                        code=(
-                            "const postgres = inputs.postgres_rows ?? [];\n"
-                            "const mongo = inputs.mongo_docs ?? [];\n"
-                            "return postgres.flatMap((left) => mongo\n"
-                            "  .filter((right) => right.business_id === left.business_id)\n"
-                            "  .map((right) => ({ ...left, ...right, repaired: true }))\n"
-                            ");"
+                        code=json.dumps(
+                            {
+                                "operation": "merge_on_key",
+                                "left_input": "postgres_rows",
+                                "right_input": "mongo_docs",
+                                "left_key": "business_id",
+                                "right_key": "business_id",
+                                "join_type": "inner",
+                                "require_repaired": True,
+                                "repaired": True,
+                            }
                         ),
                         parameters=step.parameters,
                         input_refs=step.input_refs,
@@ -457,7 +462,18 @@ def run_runtime_sandbox_demo() -> int:
             ExecutionStep(
                 step_id="merge-results",
                 kind=StepKind.MERGE,
-                code="return { repaired: false };",
+                code=json.dumps(
+                    {
+                        "operation": "merge_on_key",
+                        "left_input": "postgres_rows",
+                        "right_input": "mongo_docs",
+                        "left_key": "business_id",
+                        "right_key": "business_id",
+                        "join_type": "inner",
+                        "require_repaired": True,
+                        "repaired": False,
+                    }
+                ),
                 input_refs=["postgres_rows", "mongo_docs"],
                 output_key="joined_rows",
             ),
@@ -535,7 +551,18 @@ def run_real_runtime_sandbox_demo() -> int:
             ExecutionStep(
                 step_id="merge-results",
                 kind=StepKind.MERGE,
-                code="return { status: 'pending-merge', repaired: false };",
+                code=json.dumps(
+                    {
+                        "operation": "merge_on_key",
+                        "left_input": "postgres_rows",
+                        "right_input": "mongo_docs",
+                        "left_key": "business_id",
+                        "right_key": "business_id",
+                        "join_type": "inner",
+                        "require_repaired": True,
+                        "repaired": False,
+                    }
+                ),
                 input_refs=["postgres_rows", "mongo_docs"],
                 output_key="joined_rows",
             ),

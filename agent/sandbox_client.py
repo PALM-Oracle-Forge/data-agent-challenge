@@ -6,7 +6,7 @@ format so the execution engine can treat backend, HTTP, and mocked responses
 the same way.
 
 Expected sandbox contract:
-- input: ``code_plan``, ``trace_id``, optional ``inputs_payload``
+- input: ``code`` or ``code_plan``, ``trace_id``, optional ``inputs_payload``
 - output: ``result``, ``trace``, ``validation_status``, ``error_if_any``
 
 TODO:
@@ -25,6 +25,8 @@ from typing import Any, Dict, Optional
 
 from .types import SandboxExecutionRequest, SandboxResult
 
+DEFAULT_SANDBOX_URL = "https://data-agent-challenge-sandbox.mdwithgod.workers.dev"
+
 
 class SandboxClient:
     """Minimal adapter around a sandbox backend or transport stub."""
@@ -36,7 +38,7 @@ class SandboxClient:
         timeout_seconds: float = 10.0,
     ) -> None:
         self.backend = backend
-        resolved_base_url = base_url or os.getenv("SANDBOX_URL")
+        resolved_base_url = base_url or os.getenv("SANDBOX_URL") or DEFAULT_SANDBOX_URL
         self.base_url = resolved_base_url.rstrip("/") if resolved_base_url else None
         self.timeout_seconds = timeout_seconds
 
@@ -61,6 +63,7 @@ class SandboxClient:
             )
 
         payload = {
+            "code": request.code_plan,
             "code_plan": request.code_plan,
             "trace_id": request.trace_id,
             "inputs_payload": request.inputs_payload,
@@ -97,6 +100,7 @@ class SandboxClient:
             )
 
         payload = {
+            "code": request.code_plan,
             "code_plan": request.code_plan,
             "trace_id": request.trace_id,
             "inputs_payload": request.inputs_payload,
@@ -114,7 +118,11 @@ class SandboxClient:
         req = urllib.request.Request(
             f"{self.base_url}{path}",
             data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": "Oracle-Forge-Agent/1.0",
+            },
             method="POST",
         )
 
