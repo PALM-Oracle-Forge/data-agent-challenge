@@ -247,8 +247,9 @@ def test_load_layer2_reads_kb_docs(tmp_path, monkeypatch):
 
     cm = ContextManager(databases={})
     docs = cm._load_layer2()
-    assert any("Test" in d.content for d in docs)
+    # Tier A transition: architecture docs are pre-loaded; Tier B (domain) are on-demand only.
     assert any("Agent context" in d.content for d in docs)
+    assert not any("Test" in d.content for d in docs)
 
 
 def test_load_layer2_missing_agent_md(tmp_path, monkeypatch):
@@ -285,7 +286,25 @@ def test_load_layer2_document_source_is_set(tmp_path, monkeypatch):
 
     cm = ContextManager(databases={})
     docs = cm._load_layer2()
+    # Tier A docs (AGENT.md etc) should be present and have sources
+    assert len(docs) > 0
     assert all(d.source for d in docs)
+
+
+def test_get_docs_for_question_loads_tier_b(tmp_path, monkeypatch):
+    """Tier B documents (domain knowledge) must load on-demand via keyword matching."""
+    domain_dir = tmp_path / "kb" / "domain"
+    domain_dir.mkdir(parents=True)
+    (domain_dir / "domain_term_definitions.md").write_text("revenue definition")
+
+    import agent.context_manager as cm_module
+    monkeypatch.setattr(cm_module, "_KB_DOMAIN", domain_dir)
+
+    cm = ContextManager(databases={})
+    # 'revenue' is a trigger for domain_term_definitions.md
+    docs = cm.get_docs_for_question("What is the revenue?")
+    assert len(docs) == 1
+    assert "revenue definition" in docs[0].content
 
 
 # ── Unit tests: Layer 3 (interaction memory) ──────────────────────────────────
