@@ -1040,22 +1040,8 @@ Pre-processing pass committed to KB worth testing.
 | Apr 15 | Medium | Article 3 — Kidus Five Failure Modes | https://medium.com/@ktewodros41/five-ways-a-data-agent-fails-and-what-each-one-actually-looks-like-in-practice-4546a6e230dc | TBC |
 | Apr 18 | X | Thread 8 — DAB Submission Recap (Mistire) | https://x.com/Mistire37/status/2045399956740088290 | 42 views (6 tweets) |
 | Apr 18 | LinkedIn | Article 4 — Mistire Two Weeks One Benchmark | https://www.linkedin.com/pulse/two-weeks-one-benchmark-six-people-what-we-actually-learned-daniel-kr8nf | Pending |
-| TBC | X | Thread 7 — Five Failure Modes | TBC | TBC |
+
 
 ---
 
-## ⚠️ Outstanding Before Saturday Final Submission
 
-- [ ] Thread 7 — Five Failure Modes X thread —
-      post and save URL
-- [ ] Thread 8 — DAB PR announcement — post when
-      PR opens and save URL
-- [ ] Update all TBC metrics with actual views
-      and responses
-- [ ] Monitor Reddit Entry 4 (embedded data
-      r/learnmachinelearning) for replies
-- [ ] Add Week 9 Day 5 Slack post once it happens
-- [ ] Complete engagement portfolio summary for
-      signal/ directory final submission
-- [ ] Update DeepWiki link in team documentation:
-      https://deepwiki.com/PALM-Oracle-Forge/data-agent-challenge
