@@ -16,17 +16,105 @@ Team: `PaLM`
 ## Architecture Overview
 
 ```
-Oracle Forge Agent
-    |
-    |-- Context Manager (KB layers, schema, domain knowledge)
-    |-- Agentic Loop (LLM + Tool execution)
-    |-- MCP Toolbox (Database connectors)
-    |   |-- PostgreSQL (bookreview_db)
-    |   |-- MongoDB (yelp_db)
-    |   |-- SQLite (review_database)
-    |   |-- DuckDB (user_database)
-    |-- Evaluation Harness (Scoring, tracing, validation)
-    |-- Self-Correction Loop (Error recovery)
+flowchart TD
+    %% =======================
+    %% Entry
+    %% =======================
+    U[User Query] --> CM
+
+    %% =======================
+    %% Layer 1: Context Injection
+    %% =======================
+    subgraph Layer1["Layer 1 — Context Injection"]
+        CM[Context Manager]
+        KB1[KB v1: Architecture]
+        KB2[KB v2: Domain + Schema + Join Glossary]
+        KB3[KB v3: Corrections + Patterns]
+        
+        KB1 --> CM
+        KB2 --> CM
+        KB3 --> CM
+    end
+
+    %% =======================
+    %% Layer 2: Conductor (Planning + Routing)
+    %% =======================
+    CM --> QR["Layer 2 — Conductor Agent\n(Planner + Router)"]
+
+    %% =======================
+    %% Layer 3: Execution (MCP + Databases)
+    %% =======================
+    QR --> MCP
+
+    subgraph Layer3["Layer 3 — Multi-DB Execution (MCP)"]
+        MCP[MCP Toolbox]
+        PG[(PostgreSQL)]
+        MG[(MongoDB)]
+        SL[(SQLite)]
+        DD[(DuckDB)]
+
+        MCP --> PG
+        MCP --> MG
+        MCP --> SL
+        MCP --> DD
+    end
+
+    %% =======================
+    %% Layer 4: Self-Correction Loop
+    %% =======================
+    MCP --> Repair
+
+    subgraph Layer4["Layer 4 — Self-Correction Loop"]
+        Repair[Coordinator]
+        FD[Failure Detector]
+        JR[Join Key Resolver]
+        TE[Sandbox Text Extractor]
+        RM[Result Merger + Validation]
+
+        Repair --> FD
+        Repair --> JR
+        Repair --> TE
+        Repair --> RM
+
+        FD --> Repair
+        JR --> Repair
+        TE --> Repair
+        RM --> Repair
+    end
+
+    %% =======================
+    %% Layer 5: Evaluation Harness
+    %% =======================
+    Repair --> Harness
+
+    subgraph Layer5["Layer 5 — Evaluation Harness"]
+        Harness[Harness Controller]
+        TL[Trace Logger]
+        SC[pass@1 Scorer]
+        RS[Regression Suite]
+
+        Harness --> TL
+        Harness --> SC
+        Harness --> RS
+    end
+
+    %% =======================
+    %% Output
+    %% =======================
+    Harness --> Output["Final Output\n{answer, query_trace, confidence}"]
+
+    %% =======================
+    %% Feedback Loop
+    %% =======================
+    Output -.->|Corrections / Learnings| KB3
+    KB3 -.-> CM["Context Manager(Claude 3-Layer Memory)"]
+
+    %% =======================
+    %% Styling
+    %% =======================
+    style Layer1 fill:#e3f2fd
+    style Layer4 fill:#fff3e0
+    style Layer5 fill:#e8f5e8
 ```
 
 ## Quick Start (5 Minutes)
