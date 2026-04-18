@@ -36,16 +36,25 @@ import os
 import re
 import sys
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 ROOT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT_DIR))
-
+from utils.dab_output import (
+    next_query_dir,
+    ensure_query_artifacts,
+    ensure_run_dir,
+    write_dab_style_run,
+    write_summary,
+)
 from dotenv import load_dotenv
 
 load_dotenv()
 
+from agent.config_manager import ConfigManager
 from agent.oracle_forge_agent import OracleForgeAgent
 
 KB_DATASET_OVERVIEW = ROOT_DIR / "kb" / "domain" / "dataset_overview.md"
@@ -59,9 +68,6 @@ _TYPE_MAP: Dict[str, str] = {
     "sqlite": "sqlite",
     "duckdb": "duckdb",
 }
-
-
-from agent.config_manager import ConfigManager
 
 # ---------------------------------------------------------------------------
 # Main
@@ -112,12 +118,12 @@ def main() -> None:
     parser.add_argument(
         "--root_name",
         default="run",
-        help="Prefix for output files (default: run).",
+        help="Prefix for per-run log files inside logs/ (default: run).",
     )
     parser.add_argument(
         "--output_dir",
         default="results",
-        help="Directory for result files (default: results/).",
+        help="Root directory for result folders (default: results/).",
     )
     parser.add_argument(
         "--databases",
@@ -171,6 +177,7 @@ def main() -> None:
     db_configs = config_mgr.build_db_configs_from_env(
         databases_info, dataset_name=args.dataset.lower()
     )
+    # validate_runtime_dependencies(databases_info, db_configs)  # TODO: Implement if needed
 
     # ------------------------------------------------------------------
     # 4. Print run summary header
@@ -183,14 +190,21 @@ def main() -> None:
     print(f"Max iters    : {args.iterations}  (agentic loop LLM steps)")
     print(f"Output prefix: {args.root_name}")
     print(f"Batched runs : {len(queries)} queries found.")
+    print(f"Iterations   : {args.iterations}")
+    print(f"Log prefix    : {args.root_name}")
     print()
 
     # ------------------------------------------------------------------
-    # 5. Prepare output directory (nested under dataset name)
+    # 5. Prepare output directory using query-centered layout
     # ------------------------------------------------------------------
-    output_dir = Path(args.output_dir) / args.dataset
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # DAB-style output root
+    dataset_dir = Path(args.output_dir) / f"query_{args.dataset}"
+    dataset_dir.mkdir(parents=True, exist_ok=True)
+    target_query_dir = next_query_dir(dataset_dir)
 
+    # copy query.json + validate.py + ground_truth.csv if present
+    if queries:
+        ensure_query_artifacts(target_query_dir, queries[0])
     # ------------------------------------------------------------------
     # 6. Run logic in try/finally
     # ------------------------------------------------------------------
@@ -234,7 +248,25 @@ def main() -> None:
                     "hints": hints_text,
                 }
             )
+            run_name = args.root_name if len(queries) == 1 else f"{args.root_name}_{q_path.stem}"
 
+            per_query_dir = target_query_dir if len(queries) == 1 else (target_query_dir / q_path.stem)
+            per_query_dir.mkdir(parents=True, exist_ok=True)
+            if len(queries) > 1:
+                ensure_query_artifacts(per_query_dir, q_path)
+
+            run_dir = ensure_run_dir(per_query_dir, run_name)
+
+            # these stay empty until OracleForgeAgent exposes them
+            llm_calls = getattr(agent, "llm_calls", [])
+            tool_calls = getattr(agent, "tool_calls", [])
+
+            write_dab_style_run(
+                run_dir,
+                result,
+                llm_calls=llm_calls,
+                tool_calls=tool_calls,
+            )
             elapsed = round(time.perf_counter() - t0, 3)
             print(f"Finished in {elapsed}s")
 
@@ -248,15 +280,7 @@ def main() -> None:
                 "iterations_used": result.get("iterations"),
                 "terminate_reason": result.get("terminate_reason"),
             }
-
-            # ------------------------------------------------------------------
-            # 7. Write result file
-            # ------------------------------------------------------------------
-            out_name = args.root_name if len(queries) == 1 else f"{args.root_name}_{q_path.stem}"
-            out_file = output_dir / f"{out_name}.json"
-            out_file.write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
-            print(f"Result written to {out_file}")
-
+            
             # ------------------------------------------------------------------
             # 8. Print final answer
             # ------------------------------------------------------------------
@@ -265,6 +289,39 @@ def main() -> None:
             print(f"Iterations   : {result.get('iterations')} / {args.iterations}")
             print(f"Stopped      : {result.get('terminate_reason')}\n")
 
+        summary_path = write_summary(
+            target_query_dir=target_query_dir,
+            root_name=args.root_name,
+            dataset=args.dataset,
+            db_ids=db_ids,
+            question=str(question),
+            iterations=len(queries),
+            all_results=[],
+            output_root=Path(args.output_dir),
+        )
+        print(f"Summary written to {summary_path}")
+        
+        # ------------------------------------------------------------------
+        # 7. Write summary file
+        # ------------------------------------------------------------------
+        all_results = []  # Initialize empty results list for single query run
+        summary_path = per_query_dir / f"{args.root_name}_summary.json"
+        summary = {
+            "dataset": args.dataset,
+            "databases": db_ids,
+            "question": question,
+            "query_file": str((per_query_dir / "query.json").relative_to(Path(args.output_dir))),
+            "iterations": args.iterations,
+            "results": all_results,
+        }
+        summary_path.write_text(
+            json.dumps(summary, indent=2, default=str), encoding="utf-8"
+        )
+        print(f"\nSummary written to {summary_path}")
+
+    except Exception as e:
+        print(f"Error during execution: {e}")
+        raise
     finally:
         print("Executing cleanup operations...")
         agent.end_session()

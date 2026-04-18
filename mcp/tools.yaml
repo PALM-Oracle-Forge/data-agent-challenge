@@ -35,6 +35,28 @@ sources:
     kind: sqlite
     database: /datasets/query_crmarenapro/query_dataset/territory.db
 
+  # Additional SQLite sources for new databases
+  sqlite_patents:
+    kind: sqlite
+    database: /datasets/query_PATENTS/query_dataset/patents_query.db
+
+  # PostgreSQL sources for new databases
+  postgres_business:
+    kind: postgres
+    host: team-dab-postgres
+    port: 5432
+    database: business_database
+    user: postgres
+    password: teampalm
+
+  postgres_clinical:
+    kind: postgres
+    host: team-dab-postgres
+    port: 5432
+    database: clinical_database
+    user: postgres
+    password: teampalm
+
 tools:
   list_tables:
     kind: postgres-sql
@@ -119,6 +141,22 @@ tools:
     source: sqlite_crm_territory
     description: Execute SQL against the CRM Arena Pro territory SQLite database.
 
+  # Tools for new databases
+  sqlite_patents_query:
+    kind: sqlite-execute-sql
+    source: sqlite_patents
+    description: Execute SQL against the Patents SQLite database.
+
+  run_business_query:
+    kind: postgres-execute-sql
+    source: postgres_business
+    description: Execute an arbitrary SQL query against the Business Database.
+
+  run_clinical_query:
+    kind: postgres-execute-sql
+    source: postgres_clinical
+    description: Execute an arbitrary SQL query against the Clinical Database.
+
 toolsets:
   oracle_forge:
     tools:
@@ -134,3 +172,6 @@ toolsets:
       - sqlite_crm_core_query
       - sqlite_crm_products_query
       - sqlite_crm_territory_query
+      - sqlite_patents_query
+      - run_business_query
+      - run_clinical_query

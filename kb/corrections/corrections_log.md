@@ -221,3 +221,52 @@ print(env.keys())
 [Outcome]    verified successful
 [db=sandbox] [2026-04-17T11:52:01.923407]
 ---
+
+[Query]      Which decade of publication (e.g., 1980s) has the highest average rating among decades with at least 10 distinct books that have been rated? Return the decade with the highest average rating.
+[Failure]    execute_python exception: KeyError: 'data_8'
+[Root Cause] agentic_runtime_error
+[Fix]        Corrected execute_python payload:
+print(list(env.keys()))
+[Outcome]    verified successful
+[db=sandbox] [2026-04-18T15:43:08.673197]
+---
+
+[Query]      Which English-language books in the 'Literature & Fiction' category have a perfect average rating of 5.0? Return all matching books.
+[Failure]    execute_python exception:   File "pandas/_libs/hashtable_class_helper.pxi", line 7668, in pandas._libs.hasht
+[Root Cause] agentic_runtime_error
+[Fix]        Corrected execute_python payload:
+import pandas as pd
+reviews_df = pd.DataFrame(env['data_2'])
+print(reviews_df.columns)
+
+[Outcome]    verified successful
+[db=sandbox] [2026-04-18T15:49:30.098034]
+---
+
+[Query]      Which books categorized as 'Children's Books' have received an average rating of at least 4.5 based on reviews from 2020 onwards?
+[Failure]    execute_python exception:   File "pandas/_libs/hashtable_class_helper.pxi", line 7668, in pandas._libs.hasht
+[Root Cause] agentic_runtime_error
+[Fix]        Corrected execute_python payload:
+import pandas as pd
+
+books = env['data_2']
+reviews = env['data_3']
+
+df_books = pd.DataFrame(books)
+df_reviews = pd.DataFrame(reviews)
+
+print("Books columns:", df_books.columns)
+print("Reviews columns:", df_reviews.columns)
+
+[Outcome]    verified successful
+[db=sandbox] [2026-04-18T16:00:24.804980]
+---
+
+[Query]      Which books categorized as 'Children's Books' have received an average rating of at least 4.5 based on reviews from 2020 onwards?
+[Failure]    execute_python exception: KeyError: 'data_8'
+[Root Cause] agentic_runtime_error
+[Fix]        Corrected execute_python payload:
+print(env.keys())
+[Outcome]    verified successful
+[db=sandbox] [2026-04-18T16:00:24.805502]
+---
