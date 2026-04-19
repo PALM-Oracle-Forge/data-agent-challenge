@@ -1,0 +1,44 @@
+[
+  {
+    "dataset": "agnews",
+    "query": "1",
+    "run": "0",
+    "answer": "Unable to determine answer."
+  },
+  {
+    "dataset": "agnews",
+    "query": "2",
+    "run": "0",
+    "answer": "Unable to determine answer."
+  },
+  {
+    "dataset": "googlelocal",
+    "query": "1",
+    "run": "0",
+    "answer": "['Widows Peak Salon', 'City Textile', 'Nobel Textile Co', 'San Soo Dang', 'Nova Fabrics']"
+  },
+  {
+    "dataset": "googlelocal",
+    "query": "2",
+    "run": "0",
+    "answer": "[{'name': 'Angel-A Massage', 'avg_rating': 4.33333333333333}, {'name': 'Elite Massage', 'avg_rating': 5.0}, {'name': 'Aurora Massage', 'avg_rating': 4.17857142857143}]"
+  },
+  {
+    "dataset": "googlelocal",
+    "query": "3",
+    "run": "0",
+    "answer": "[{\"name\": \"Taba Rug Gallery\", \"hours\": [\"Thursday\", \"10AM\u20137PM\", \"Friday\", \"10AM\u20137PM\", \"Saturday\", \"10AM\u20137PM\", \"Sunday\", \"11AM\u20136PM\", \"Monday\", \"10AM\u20137PM\", \"Tuesday\", \"10AM\u20137PM\", \"Wednesday\", \"10AM\u20137PM\"], \"average_rating\": 5.0}, {\"name\": \"Beauty Divine Artistry\", \"hours\": [\"Thursday\", \"9AM\u20138PM\", \"Friday\", \"9AM\u20138PM\", \"Saturday\", \"10AM\u20137PM\", \"Sunday\", \"11AM\u20136PM\", \"Monday\", \"9AM\u20138PM\", \"Tuesday\", \"9AM\u20138PM\", \"Wednesday\", \"9AM\u20138PM\"], \"average_rating\": 5.0}, {\"name\": \"White Barn Candle Co\", \"hours\": [\"Thursday\", \"10AM\u20139PM\", \"Friday\", \"10AM\u20139PM\", \"Saturday\", \"10AM\u20139PM\", \"Sunday\", \"11AM\u20137PM\", \"Monday\", \"10AM\u20139PM\", \"Tuesday\", \"10AM\u20139PM\", \"Wednesday\", \"10AM\u20139PM\"], \"average_rating\": 5.0}, {\"name\": \"TACOS LA CABANA\", \"hours\": [\"Thursday\", \"Closed\", \"Friday\", \"5\u201311PM\", \"Saturday\", \"5\u201311PM\", \"Sunday\", \"5\u201311PM\", \"Monday\", \"5\u201311PM\", \"Tuesday\", \"Closed\", \"Wednesday\", \"Closed\"], \"average_rating\": 5.0}, {\"name\": \"Mariscos el poblano\", \"hours\": [\"Thursday\", \"Open 24 hours\", \"Friday\", \"8AM\u20133:30PM\", \"Saturday\", \"8AM\u20133:30PM\", \"Sunday\", \"8AM\u20133:30PM\", \"Monday\", \"9AM\u20133:30AM\", \"Tuesday\", \"8AM\u20133:30PM\", \"Wednesday\", \"8AM\u20133:30PM\"], \"average_rating\": 5.0}]"
+  },
+  {
+    "dataset": "googlelocal",
+    "query": "4",
+    "run": "0",
+    "answer": "['Encino Dermatology & Laser: Alex Khadavi MD (19)', 'The Boochyard @ Local Roots (17)', 'Aurora Massage (14)']"
+  },
+  {
+    "dataset": "agnews",
+    "query": "1",
+    "run": "1",
+    "answer": "The Rundown"
+  }
+]
