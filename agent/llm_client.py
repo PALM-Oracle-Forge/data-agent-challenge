@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 
 try:
     import anthropic  # type: ignore
@@ -17,7 +17,7 @@ except ImportError:  # pragma: no cover
     anthropic = None
 
 OPENROUTER_URL_DEFAULT = "https://openrouter.ai/api/v1"
-OPENROUTER_MODEL_DEFAULT = "google/gemini-3.1-pro-preview"
+OPENROUTER_MODEL_DEFAULT = "gemini-3.1-pro-preview"
 
 
 class LLMResponseContent:
@@ -55,10 +55,11 @@ class LLMToolCallResponse:
         text: Any text content returned alongside or instead of tool calls.
     """
 
-    def __init__(self, tool_calls: List[LLMToolCall], stop_reason: str, text: str):
+    def __init__(self, tool_calls: List[LLMToolCall], stop_reason: str, text: str, usage: Optional[Dict[str, Any]] = None):
         self.tool_calls = tool_calls
         self.stop_reason = stop_reason
         self.text = text
+        self.usage = usage or {}
 
     @property
     def has_tool_calls(self) -> bool:
@@ -67,7 +68,7 @@ class LLMToolCallResponse:
     def __repr__(self) -> str:
         return (
             f"LLMToolCallResponse(tool_calls={self.tool_calls!r}, "
-            f"stop_reason={self.stop_reason!r}, text={self.text!r})"
+            f"stop_reason={self.stop_reason!r}, text={self.text!r}, usage={self.usage!r})"
         )
 
 
@@ -104,17 +105,20 @@ class LLMClient:
         max_tokens: Optional[int] = None,
         temperature: float = 0.0,
         model: Optional[str] = None,
+        system: Optional[str] = None,
         **kwargs: Any,
     ) -> LLMResponse:
-        resolved_model = model or os.getenv("OPENROUTER_MODEL", self._openrouter_model)
+        resolved_model = model or self._openrouter_model
         if self._backend == "anthropic":
-            return self._client.messages.create(
+            response = self._client.messages.create(
                 model=resolved_model,
-                messages=messages,
                 max_tokens=max_tokens,
                 temperature=temperature,
+                system=system,
+                messages=messages,
                 **kwargs,
             )
+            return LLMResponse(response.content[0].text)
         return self._create_openrouter_response(
             model=resolved_model,
             messages=messages,
@@ -179,6 +183,7 @@ class LLMClient:
         max_tokens: int = 1024,
         temperature: float = 0.0,
         system: Optional[str] = None,
+        enable_caching: bool = True,
     ) -> LLMToolCallResponse:
         """
         Call the LLM with tool definitions available and return a structured response.
@@ -197,6 +202,10 @@ class LLMClient:
             max_tokens: Max response tokens.
             temperature: Sampling temperature (0 = deterministic).
             system: Optional system prompt string.
+            enable_caching: When True (default), place an ephemeral cache
+                breakpoint on the first user message so that [tools + system +
+                first user] becomes a cached prefix on Anthropic-compatible
+                backends.  Harmless on providers that ignore cache_control.
 
         Returns:
             LLMToolCallResponse with:
@@ -211,6 +220,7 @@ class LLMClient:
                 max_tokens=max_tokens,
                 temperature=temperature,
                 system=system,
+                enable_caching=enable_caching,
             )
         return self._create_with_tools_openrouter(
             messages=messages,
@@ -218,6 +228,7 @@ class LLMClient:
             max_tokens=max_tokens,
             temperature=temperature,
             system=system,
+            enable_caching=enable_caching,
         )
 
     def _create_with_tools_anthropic(
@@ -227,9 +238,12 @@ class LLMClient:
         max_tokens: int,
         temperature: float,
         system: Optional[str],
+        enable_caching: bool = True,
     ) -> LLMToolCallResponse:
         """Anthropic native tool-calling via the `tools=` parameter."""
         converted = _convert_messages_to_anthropic(messages)
+        if enable_caching:
+            converted = _with_cache_control(converted)
 
         kwargs: Dict[str, Any] = {
             "model": os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6"),
@@ -258,6 +272,7 @@ class LLMClient:
             tool_calls=tool_calls,
             stop_reason=response.stop_reason,
             text=" ".join(text_parts).strip(),
+            usage=_normalize_usage(getattr(response, "usage", None)),
         )
 
     def _create_with_tools_openrouter(
@@ -267,6 +282,7 @@ class LLMClient:
         max_tokens: int,
         temperature: float,
         system: Optional[str],
+        enable_caching: bool = True,
     ) -> LLMToolCallResponse:
         """OpenRouter OpenAI-compatible tool-calling via the `tools=` JSON field."""
         # Convert Anthropic-style input_schema to OpenAI function schema format
@@ -288,6 +304,15 @@ class LLMClient:
         all_messages.extend(messages)
 
         final_model = os.getenv("OPENROUTER_MODEL", self._openrouter_model)
+        # cache_control markers are honoured only by Anthropic models.  For
+        # Gemini / OpenAI via OpenRouter, the resulting content-as-list format
+        # with unknown `cache_control` fields has been observed to occasionally
+        # cause the model to return an empty response (no text, no tool call)
+        # on long tool-call histories.  Gemini already does implicit caching
+        # automatically, so we gain nothing by sending the markers.  Only apply
+        # them when we know the underlying model is Anthropic.
+        if enable_caching and _model_supports_cache_control(final_model):
+            all_messages = _with_cache_control(all_messages)
         payload: Dict[str, Any] = {
             "model": final_model,
             "messages": all_messages,
@@ -333,10 +358,13 @@ class LLMClient:
             )
 
         stop_reason = choices[0].get("finish_reason", "")
+        usage = _normalize_usage(data.get("usage"))
+
         return LLMToolCallResponse(
             tool_calls=tool_calls,
             stop_reason=stop_reason,
             text=str(text).strip() if text else "",
+            usage=usage,
         )
 
 
@@ -405,3 +433,138 @@ def _convert_messages_to_anthropic(
         converted.append({"role": "user", "content": pending_tool_results})
 
     return converted
+
+
+# ── Prompt caching helpers ────────────────────────────────────────────────────
+
+# Minimum user-message size before we bother adding a cache breakpoint.
+# Anthropic requires ~1024 input tokens (~4000 chars) before caching engages;
+# smaller prefixes would pay the cache-write cost without ever being reused.
+_CACHE_MIN_CHARS = 4000
+
+
+def _model_supports_cache_control(model: str) -> bool:
+    """Return True when the given OpenRouter model id routes to Anthropic.
+
+    Only Anthropic honours `cache_control: {"type": "ephemeral"}`.  Sending
+    the marker to other providers (Gemini, OpenAI, Mistral, …) forces the
+    first user message into content-as-list form with an unknown field, which
+    has been observed to destabilise some providers' tool-calling on long
+    histories.  Gemini, DeepSeek, and GPT-4o-mini already have their own
+    implicit caching, so no explicit marker is needed there.
+    """
+    if not model:
+        return False
+    m = model.lower()
+    return m.startswith("anthropic/") or m.startswith("claude-") or "claude" in m or "gemini-" in m
+
+
+def _with_cache_control(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Return a shallow copy of `messages` with a single ephemeral cache_control
+    breakpoint on the last text block of the first user message.
+
+    Effect for supported backends:
+      - Anthropic native (claude-*): caches [tools + system + first user] prefix.
+        Subsequent calls within 5 min pay ~10% of normal input token cost for
+        this prefix.
+      - OpenRouter → Anthropic: forwarded transparently, same behaviour.
+      - OpenRouter → Gemini / others: cache_control markers are ignored by
+        providers that don't support them (Gemini does implicit caching
+        automatically).  The request still succeeds.
+
+    Idempotent: calling it twice on the same list does not add two markers.
+    Safe: never mutates the input; returns a new list with new top-level dicts.
+    """
+    if not messages:
+        return messages
+
+    user_idx = next(
+        (i for i, m in enumerate(messages) if m.get("role") == "user"),
+        -1,
+    )
+    if user_idx < 0:
+        return messages
+
+    first_user = messages[user_idx]
+    content = first_user.get("content", "")
+
+    if isinstance(content, str):
+        if len(content) < _CACHE_MIN_CHARS:
+            return messages
+        new_content = [{
+            "type": "text",
+            "text": content,
+            "cache_control": {"type": "ephemeral"},
+        }]
+    elif isinstance(content, list) and content:
+        total_chars = sum(
+            len(b.get("text", "")) for b in content if isinstance(b, dict)
+        )
+        if total_chars < _CACHE_MIN_CHARS:
+            return messages
+        # Idempotency — skip if any block already has cache_control
+        if any(
+            isinstance(b, dict) and "cache_control" in b for b in content
+        ):
+            return messages
+        new_blocks = list(content)
+        for i in range(len(new_blocks) - 1, -1, -1):
+            b = new_blocks[i]
+            if isinstance(b, dict) and b.get("type") == "text":
+                new_blocks[i] = {**b, "cache_control": {"type": "ephemeral"}}
+                break
+        else:
+            return messages  # no text block found to mark
+        new_content = new_blocks
+    else:
+        return messages
+
+    new_first = {**first_user, "content": new_content}
+    return list(messages[:user_idx]) + [new_first] + list(messages[user_idx + 1:])
+
+
+def _normalize_usage(raw: Any) -> Dict[str, Any]:
+    """
+    Convert backend usage payload to a uniform dict with cache fields.
+
+    Handled shapes:
+      - Anthropic SDK: `response.usage` object with attributes
+        `input_tokens`, `output_tokens`, `cache_read_input_tokens`,
+        `cache_creation_input_tokens`.
+      - OpenRouter (OpenAI-compat) dict with top-level
+        `prompt_tokens`, `completion_tokens`, `total_tokens`,
+        and optional `prompt_tokens_details.cached_tokens` (OpenAI) or
+        `cache_read_input_tokens` / `cache_creation_input_tokens`
+        (when routed to Anthropic).
+    """
+    if raw is None:
+        return {}
+    # Duck-type attribute access (SDK object) vs dict access
+    def _get(obj: Any, key: str, default: int = 0) -> int:
+        if isinstance(obj, dict):
+            return int(obj.get(key, default) or default)
+        return int(getattr(obj, key, default) or default)
+
+    prompt_tokens = _get(raw, "prompt_tokens") or _get(raw, "input_tokens")
+    completion_tokens = _get(raw, "completion_tokens") or _get(raw, "output_tokens")
+    total_tokens = _get(raw, "total_tokens") or (prompt_tokens + completion_tokens)
+
+    cache_read = _get(raw, "cache_read_input_tokens")
+    cache_creation = _get(raw, "cache_creation_input_tokens")
+    # OpenAI-style nested path (OpenRouter for non-Anthropic providers)
+    if isinstance(raw, dict) and not cache_read:
+        details = raw.get("prompt_tokens_details") or {}
+        if isinstance(details, dict):
+            cache_read = int(details.get("cached_tokens", 0) or 0)
+
+    out: Dict[str, Any] = {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+        "cache_read_tokens": cache_read,
+        "cache_creation_tokens": cache_creation,
+    }
+    if isinstance(raw, dict) and "cost" in raw:
+        out["cost"] = float(raw.get("cost") or 0.0)
+    return out
