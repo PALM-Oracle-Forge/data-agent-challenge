@@ -19,7 +19,7 @@ bin/toolbox
 .hypothesis/
 CLAUDE.md
 ut/
-results/
+
 memory/
 agent/*.md
 query/

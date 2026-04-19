@@ -2,7 +2,7 @@ sources:
   postgres_main:
     kind: postgres
     host: team-dab-postgres
-    port: 5432
+    port: 5435
     database: bookreview_db
     user: postgres
     password: teampalm
@@ -44,7 +44,7 @@ sources:
   postgres_business:
     kind: postgres
     host: team-dab-postgres
-    port: 5432
+    port: 5435
     database: business_database
     user: postgres
     password: teampalm
@@ -52,7 +52,7 @@ sources:
   postgres_clinical:
     kind: postgres
     host: team-dab-postgres
-    port: 5432
+    port: 5435
     database: clinical_database
     user: postgres
     password: teampalm
