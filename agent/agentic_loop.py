@@ -18,13 +18,21 @@ Architecture:
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from agent.llm_client import LLMClient, LLMToolCall, LLMToolCallResponse
 from agent.sandbox_client import SandboxClient
 from agent.types import SandboxExecutionRequest
+
+TOOL_LOG_MAX_PREVIEW = 10_000  # matches DAB BaseTool.exec truncation
+
+DEFAULT_MAX_TOKENS = 16384
+LENGTH_RETRY_MAX_TOKENS = 32768  # one-shot bump when backend returns stop_reason=length
 
 
 # ── Result dataclass ───────────────────────────────────────────────────────────
@@ -184,10 +192,15 @@ Rules:
 - If you need to join data across TWO DIFFERENT DATABASES, you MUST query each database separately, then use the `execute_python` tool to merge the data using pandas. SQL cannot cross database boundaries here.
 - DO NOT SELECT * for large tables. Push filters down to SQL.
 - If a query returns an error, fix it and try again.
-- Call return_answer with a concise final value (number, string, or list).
 - IMPORTANT: Data returned by `query_db` is ALREADY a Python list/dict whenever possible. DO NOT use `json.loads()` on variables from the `env` dictionary unless the preview specifically shows a raw escaped JSON string.
 - For MongoDB/Yelp databases use query_type="mongo" with a JSON filter object.
 - For all other databases use query_type="sql" with standard SQL.
+
+FINALIZING YOUR ANSWER — MANDATORY:
+- Every turn MUST contain a tool call. Plain-text responses are rejected by the runtime.
+- When you know the answer, you MUST call `return_answer` with the final value. Do NOT write the answer as narrative text in the assistant message — the harness only records `return_answer` tool calls as the final answer.
+- The answer you pass to `return_answer` MUST be the literal value (a number, string, or compact list) that the grader will match against ground truth — no sentence framing like "The answer is X", just X.
+- If analysis is still needed, call `query_db` or `execute_python`; never stop early with a hedge like "Unable to determine answer" unless you have exhausted reasonable verification steps.
 """
 
 
@@ -231,6 +244,7 @@ class AgenticLoop:
         kb_context: str = "",
         max_iterations: int = 20,
         sandbox_client: Optional[SandboxClient] = None,
+        log_dir: Optional[Path] = None,
     ):
         self._toolbox = toolbox
         self._db_configs = db_configs
@@ -241,6 +255,75 @@ class AgenticLoop:
         self._sandbox_client = sandbox_client
         self._query_results: Dict[str, Any] = {}
         self._dataset_counter = 0
+
+        # DAB-format JSONL loggers. When log_dir is None, all `_log_*` calls are no-ops.
+        self._log_dir = Path(log_dir) if log_dir else None
+        self._llm_log_path: Optional[Path] = None
+        self._tool_log_path: Optional[Path] = None
+        if self._log_dir is not None:
+            self._log_dir.mkdir(parents=True, exist_ok=True)
+            self._llm_log_path = self._log_dir / "llm_calls.jsonl"
+            self._tool_log_path = self._log_dir / "tool_calls.jsonl"
+
+    # ── DAB-format logging helpers (no-op when log_dir is None) ─────────────
+
+    def _log_llm_call(
+        self,
+        start: float,
+        end: float,
+        response: Optional[LLMToolCallResponse],
+        messages: List[Dict[str, Any]],
+    ) -> None:
+        if self._llm_log_path is None:
+            return
+        response_dict: Optional[Dict[str, Any]] = None
+        if response is not None:
+            response_dict = {
+                "text": response.text,
+                "stop_reason": response.stop_reason,
+                "usage": response.usage,
+                "tool_calls": [
+                    {"id": tc.id, "name": tc.name, "arguments": tc.input}
+                    for tc in response.tool_calls
+                ],
+            }
+        entry = {
+            "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
+            "start_time": start,
+            "end_time": end,
+            "duration": end - start,
+            "model": getattr(self._client, "_openrouter_model", None),
+            "response": response_dict,
+            "messages": messages,
+        }
+        with open(self._llm_log_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, default=str) + "\n")
+
+    def _log_tool_call(
+        self,
+        tool_name: str,
+        args: Dict[str, Any],
+        success: bool,
+        result_payload: Any,
+        start_ts: str,
+        end_ts: str,
+        elapsed: float,
+    ) -> None:
+        if self._tool_log_path is None:
+            return
+        serialized = json.dumps(result_payload, default=str)
+        preview = serialized[:TOOL_LOG_MAX_PREVIEW]
+        entry = {
+            "start": start_ts,
+            "end": end_ts,
+            "time": elapsed,
+            "tool_name": tool_name,
+            "result": {"success": success, "preview": preview},
+            "args": args,
+            "val_args": args,
+        }
+        with open(self._tool_log_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, default=str) + "\n")
 
     def run(self, question: str, available_databases: List[str]) -> AgenticResult:
         """
@@ -283,13 +366,35 @@ class AgenticLoop:
             iteration += 1
 
             # Call LLM with tool definitions
+            llm_start = time.time()
             response: LLMToolCallResponse = self._client.create_with_tools(
                 messages=messages,
                 tools=AGENTIC_TOOLS,
-                max_tokens=1024,
+                max_tokens=DEFAULT_MAX_TOKENS,
                 temperature=0.0,
                 system=self._system_prompt,
             )
+            llm_end = time.time()
+            self._log_llm_call(llm_start, llm_end, response, messages)
+
+            # If the backend truncated us before any tool call was emitted,
+            # retry once with a bigger output budget. Thinking models can burn
+            # the whole output cap on reasoning and emit nothing. Retrying with
+            # the same messages but a higher max_tokens lets them finish.
+            if (
+                not response.has_tool_calls
+                and str(response.stop_reason).lower() == "length"
+            ):
+                llm_start = time.time()
+                response = self._client.create_with_tools(
+                    messages=messages,
+                    tools=AGENTIC_TOOLS,
+                    max_tokens=LENGTH_RETRY_MAX_TOKENS,
+                    temperature=0.0,
+                    system=self._system_prompt,
+                )
+                llm_end = time.time()
+                self._log_llm_call(llm_start, llm_end, response, messages)
 
             # Accumulate usage (cache_read_tokens / cache_creation_tokens are
             # populated by LLMClient when the backend supports prompt caching).
@@ -302,34 +407,47 @@ class AgenticLoop:
             total_usage["cost"] += u.get("cost", 0.0)
 
             if not response.has_tool_calls:
-                # LLM returned plain text without a tool call.
-                # If it's early in the loop, we reject this as an answer and force a tool call.
-                if iteration < 10:
-                    loaded_keys = list(self._query_results.keys())
-                    if loaded_keys:
-                        env_hint = f" You have already loaded data into: {', '.join(loaded_keys)}. Use `execute_python` to analyze it."
-                    else:
-                        env_hint = " Use `query_db` to fetch data if you haven't yet, or `list_db` to explore schema."
-                    
-                    error_msg = (
-                        f"Error: Your response must include a tool call.{env_hint} "
-                        "If you have the final answer, use `return_answer`."
+                # Plain text is never accepted as a final answer — the harness
+                # only records `return_answer` tool calls. Push back every turn
+                # and rely on max_iterations as the safety net.
+                loaded_keys = list(self._query_results.keys())
+                if loaded_keys:
+                    env_hint = (
+                        f" You have already loaded data into: {', '.join(loaded_keys)}. "
+                        "Use `execute_python` to analyze it, or call `return_answer` "
+                        "with the final value if you already have it."
                     )
-                    messages.append({"role": "user", "content": error_msg})
-                    trace.append({
-                        "iteration": iteration,
-                        "tool": "system_reminder",
-                        "input": {},
-                        "output": error_msg,
-                        "success": False,
-                    })
-                    continue
                 else:
-                    # After 10 iterations, allow it as a fallback
-                    final_answer = response.text or ""
-                    terminate_reason = "no_tool_call"
-                    messages.append({"role": "assistant", "content": response.text})
-                    break
+                    env_hint = (
+                        " Use `query_db` to fetch data, `list_db` to explore schema, "
+                        "or `return_answer` if you already have the final value."
+                    )
+
+                length_hint = ""
+                if str(response.stop_reason).lower() == "length":
+                    length_hint = (
+                        " Your last response was cut off by the output-token limit "
+                        "even after a retry. Respond with a single tool call only — "
+                        "no prose, no multi-step reasoning in the reply text. If a "
+                        "batch is too large to classify in one turn, slice it in "
+                        "Python and process chunks."
+                    )
+
+                error_msg = (
+                    "Error: every turn must contain a tool call. Plain text is not "
+                    "recorded as an answer." + env_hint + length_hint + " If you "
+                    "have the final answer, call `return_answer(answer=<value>)` — "
+                    "do not write it as narrative text."
+                )
+                messages.append({"role": "user", "content": error_msg})
+                trace.append({
+                    "iteration": iteration,
+                    "tool": "system_reminder",
+                    "input": {},
+                    "output": error_msg,
+                    "success": False,
+                })
+                continue
 
             # Build assistant message with tool calls (OpenAI-style)
             assistant_tool_calls = []
@@ -350,8 +468,21 @@ class AgenticLoop:
 
             # Execute each tool call and append results
             for tc in response.tool_calls:
+                tool_start_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                tool_start = time.time()
                 result_content, success = self._execute_tool(
                     tc, available_databases, iteration
+                )
+                tool_end = time.time()
+                tool_end_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                self._log_tool_call(
+                    tool_name=tc.name,
+                    args=tc.input,
+                    success=success,
+                    result_payload=result_content,
+                    start_ts=tool_start_ts,
+                    end_ts=tool_end_ts,
+                    elapsed=tool_end - tool_start,
                 )
 
                 trace.append({

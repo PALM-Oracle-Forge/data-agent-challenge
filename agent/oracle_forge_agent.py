@@ -452,6 +452,7 @@ class OracleForgeAgent:
         question = dab_input["question"]
         available_databases = dab_input.get("available_databases") or list(self._db_configs.keys())
         hints = dab_input.get("hints", "")
+        log_dir = dab_input.get("log_dir")
 
         # Auto-discover connection configs for any unknown dataset names
         self._resolve_missing_db_configs(available_databases)
@@ -500,6 +501,7 @@ class OracleForgeAgent:
                 prior_corrections=prior_corrections,
                 correction_applied_proactively=correction_applied_proactively,
                 hints=hints,
+                log_dir=log_dir,
             )
 
         # ── Structured mode: pre-planned QueryRouter pipeline ──────────────
@@ -588,6 +590,7 @@ class OracleForgeAgent:
         prior_corrections: list,
         correction_applied_proactively: bool,
         hints: str = "",
+        log_dir: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """
         Run the DAB-runner-style agentic loop for this question.
@@ -620,8 +623,12 @@ class OracleForgeAgent:
             kb_context=kb_context,
             max_iterations=self._max_iterations,
             sandbox_client=self._sandbox_client,
+            log_dir=log_dir,
         )
         result: AgenticResult = loop.run(question, available_databases)
+
+        # Expose the full message trace so run_agent.py can persist it into final_agent.json.
+        self._last_messages = list(result.messages)
 
         # Convert termination reason to confidence score
         if result.terminate_reason == "return_answer":

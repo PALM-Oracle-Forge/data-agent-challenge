@@ -100,6 +100,19 @@
    - If an oversize error comes back: do NOT retry the same query. Add a
      LIMIT, tighten the WHERE, or switch to an aggregation.
 
+10. **BULK TEXT CLASSIFICATION** — When a question requires assigning a
+    label (category, sentiment, topic) to many rows and no label column
+    exists, do **not** emit free-text reasoning over the whole batch in
+    one LLM turn. The output-token budget will run out before a tool call
+    is produced and the turn will return nothing. Instead:
+    - Fetch the candidate rows with `query_db`, filter as tightly as
+      possible first (e.g. author = X).
+    - In `execute_python`, write a deterministic keyword heuristic over
+      `title`/`description`/`text` and compute the count / fraction there.
+    - If a heuristic is insufficient, classify in **small batches**
+      (≤ 20 rows per LLM turn) and aggregate in Python across turns.
+    - Return the numeric answer via `return_answer` — never as narrative.
+
 ---
 
 ## Session Loading Order
