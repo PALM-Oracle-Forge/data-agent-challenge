@@ -18,6 +18,8 @@ Architecture:
 from __future__ import annotations
 
 import json
+import os
+import sys
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -33,6 +35,14 @@ TOOL_LOG_MAX_PREVIEW = 10_000  # matches DAB BaseTool.exec truncation
 
 DEFAULT_MAX_TOKENS = 16384
 LENGTH_RETRY_MAX_TOKENS = 32768  # one-shot bump when backend returns stop_reason=length
+
+# Live per-iteration stderr logging. Set AGENTIC_LOOP_VERBOSE=0 to silence.
+_VERBOSE = os.getenv("AGENTIC_LOOP_VERBOSE", "1") != "0"
+
+
+def _log(msg: str) -> None:
+    if _VERBOSE:
+        print(msg, file=sys.stderr, flush=True)
 
 
 # ── Result dataclass ───────────────────────────────────────────────────────────
@@ -353,6 +363,7 @@ class AgenticLoop:
         terminate_reason = "max_iterations"
         trace: List[Dict[str, Any]] = []
         iteration = 0
+        consecutive_empty_length = 0
         total_usage = {
             "prompt_tokens": 0,
             "completion_tokens": 0,
@@ -381,20 +392,36 @@ class AgenticLoop:
             # retry once with a bigger output budget. Thinking models can burn
             # the whole output cap on reasoning and emit nothing. Retrying with
             # the same messages but a higher max_tokens lets them finish.
+            # The retry is best-effort: if it itself errors (rate limit, upstream
+            # rejection of the larger cap, etc.) we keep the original response
+            # and fall through to the length_hint push-back below.
             if (
                 not response.has_tool_calls
                 and str(response.stop_reason).lower() == "length"
             ):
-                llm_start = time.time()
-                response = self._client.create_with_tools(
-                    messages=messages,
-                    tools=AGENTIC_TOOLS,
-                    max_tokens=LENGTH_RETRY_MAX_TOKENS,
-                    temperature=0.0,
-                    system=self._system_prompt,
-                )
-                llm_end = time.time()
-                self._log_llm_call(llm_start, llm_end, response, messages)
+                try:
+                    llm_start = time.time()
+                    retry_response = self._client.create_with_tools(
+                        messages=messages,
+                        tools=AGENTIC_TOOLS,
+                        max_tokens=LENGTH_RETRY_MAX_TOKENS,
+                        temperature=0.0,
+                        system=self._system_prompt,
+                    )
+                    llm_end = time.time()
+                    self._log_llm_call(llm_start, llm_end, retry_response, messages)
+                    response = retry_response
+                except Exception as exc:
+                    # Log the failure as a trace event and proceed with the
+                    # original length-truncated response. The loop will push
+                    # back with length_hint and the model can try again.
+                    trace.append({
+                        "iteration": iteration,
+                        "tool": "length_retry_failed",
+                        "input": {"max_tokens": LENGTH_RETRY_MAX_TOKENS},
+                        "output": f"{type(exc).__name__}: {exc}",
+                        "success": False,
+                    })
 
             # Accumulate usage (cache_read_tokens / cache_creation_tokens are
             # populated by LLMClient when the backend supports prompt caching).
@@ -406,7 +433,41 @@ class AgenticLoop:
             total_usage["cache_creation_tokens"] += u.get("cache_creation_tokens", 0)
             total_usage["cost"] += u.get("cost", 0.0)
 
+            tool_names = [tc.name for tc in response.tool_calls]
+            _log(
+                f"[iter {iteration:02d}] stop={response.stop_reason} "
+                f"tools={tool_names or '[]'} "
+                f"p={u.get('prompt_tokens',0)} c={u.get('completion_tokens',0)} "
+                f"cum_cost=${total_usage['cost']:.3f}"
+            )
+
             if not response.has_tool_calls:
+                # Circuit breaker: if two calls in a row come back with
+                # stop_reason=length and no visible text + no tool calls, the
+                # model is spending the entire output budget on hidden reasoning
+                # and we're burning ~$0.40/iter for nothing. Bail out early.
+                is_empty_length = (
+                    str(response.stop_reason).lower() == "length"
+                    and not (response.text or "").strip()
+                )
+                if is_empty_length:
+                    consecutive_empty_length += 1
+                else:
+                    consecutive_empty_length = 0
+                if consecutive_empty_length >= 2:
+                    terminate_reason = "length_loop"
+                    trace.append({
+                        "iteration": iteration,
+                        "tool": "circuit_breaker",
+                        "input": {},
+                        "output": (
+                            "2 consecutive length-truncated responses with no "
+                            "text and no tool calls — aborting to avoid cost runaway."
+                        ),
+                        "success": False,
+                    })
+                    break
+
                 # Plain text is never accepted as a final answer — the harness
                 # only records `return_answer` tool calls. Push back every turn
                 # and rely on max_iterations as the safety net.
@@ -449,6 +510,10 @@ class AgenticLoop:
                 })
                 continue
 
+            # Reset the empty-length counter on any iteration that produced
+            # real tool calls — the model is making progress again.
+            consecutive_empty_length = 0
+
             # Build assistant message with tool calls (OpenAI-style)
             assistant_tool_calls = []
             for tc in response.tool_calls:
@@ -483,6 +548,13 @@ class AgenticLoop:
                     start_ts=tool_start_ts,
                     end_ts=tool_end_ts,
                     elapsed=tool_end - tool_start,
+                )
+
+                preview = str(result_content)[:120].replace("\n", " ")
+                _log(
+                    f"  └─ {tc.name} "
+                    f"{'ok' if success else 'FAIL'} "
+                    f"({tool_end - tool_start:.1f}s): {preview}"
                 )
 
                 trace.append({

@@ -321,6 +321,22 @@ class LLMClient:
             "temperature": temperature,
             "max_tokens": max_tokens,
         }
+        # Thinking-model control. Gemini 3 Pro / GPT-5 / Claude-thinking can
+        # spend the entire completion budget on hidden reasoning, returning
+        # empty text with stop_reason=length. OpenRouter exposes a unified
+        # `reasoning` field that caps or disables this behavior.
+        # Env-configurable:
+        #   OPENROUTER_REASONING_MAX_TOKENS=0 → disable reasoning
+        #   OPENROUTER_REASONING_MAX_TOKENS=N → cap at N (default 2048)
+        reasoning_cap_env = os.getenv("OPENROUTER_REASONING_MAX_TOKENS", "2048")
+        try:
+            reasoning_cap = int(reasoning_cap_env)
+        except ValueError:
+            reasoning_cap = 2048
+        if reasoning_cap <= 0:
+            payload["reasoning"] = {"enabled": False}
+        else:
+            payload["reasoning"] = {"max_tokens": reasoning_cap}
 
         headers = {
             "Authorization": f"Bearer {self._openrouter_api_key}",
@@ -339,7 +355,11 @@ class LLMClient:
         data = response.json()
         choices = data.get("choices") or []
         if not choices:
-            raise RuntimeError("OpenRouter returned no choices for tool call")
+            err = data.get("error") or data
+            raise RuntimeError(
+                f"OpenRouter returned no choices for tool call "
+                f"(max_tokens={max_tokens}, model={final_model}): {err}"
+            )
 
         message = choices[0].get("message", {})
         raw_tool_calls = message.get("tool_calls") or []
