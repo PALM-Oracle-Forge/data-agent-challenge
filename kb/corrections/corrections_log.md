@@ -527,3 +527,381 @@ print(env.keys())
 [Outcome]    verified successful
 [db=sandbox] [2026-04-18T00:00:08.633960]
 ---
+
+[Query]      Which English-language books in the 'Literature & Fiction' category have a perfect average rating of 5.0? Return all matching books.
+[Failure]    execute_python exception: ValueError: The truth value of an array with more than one element is ambiguous. Use a.any() or a.all()
+[Root Cause] agentic_runtime_error
+[Fix]        Corrected execute_python payload:
+import pandas as pd
+import ast
+
+books = env['data_1']
+reviews = env['data_2']
+
+df_books = pd.DataFrame(books)
+df_reviews = pd.DataFrame(reviews)
+
+df_books['id_num'] = df_books['book_id'].str.extract(r'(\d+)').astype(int)
+df_reviews['id_num'] = df_reviews['purchase_id'].str.extract(r'(\d+)').astype(int)
+
+df_merged = pd.merge(df_books, df_reviews, on='id_num')
+
+def is_english(details):
+    if pd.isna(details): return False
+    return 'English' in details
+
+def is_lit_fic(categories):
+    if isinstance(categories, list):
+        return 'Literature & Fiction' in categories
+    if pd.isna(categories): return False
+    if isinstance(categories, str):
+        try:
+            cats = ast.literal_eval(categories)
+            return 'Literature & Fiction' in cats
+        except:
+            return False
+    return False
+
+df_merged['is_english'] = df_merged['details'].apply(is_english)
+df_merged['is_lit_fic'] = df_merged['categories'].apply(is_lit_fic)
+
+result = df_merged[(df_merged['is_english']) & (df_merged['is_lit_fic'])]
+print(result['title'].tolist())
+
+[Outcome]    verified successful
+[db=sandbox] [2026-04-19T14:35:19.228026]
+---
+
+[Query]      Which books categorized as 'Children's Books' have received an average rating of at least 4.5 based on reviews from 2020 onwards?
+[Failure]    execute_python exception: AttributeError: module 'rapidfuzz.fuzz' has no attribute 'distance'
+[Root Cause] agentic_runtime_error
+[Fix]        Corrected execute_python payload:
+import pandas as pd
+import ast
+from rapidfuzz import distance
+
+books = pd.DataFrame(env['data_1'])
+reviews = pd.DataFrame(env['data_3'])
+
+books['norm_id'] = books['book_id'].str.lower().str.strip()
+reviews['norm_id'] = reviews['purchase_id'].str.lower().str.strip()
+
+matches = []
+for _, book in books.iterrows():
+    for _, review in reviews.iterrows():
+        if distance.Levenshtein.distance(book['norm_id'], review['norm_id']) <= 2:
+            matches.append({
+                'title': book['title'],
+                'rating': review['rating']
+            })
+
+merged = pd.DataFrame(matches)
+print(f"Merged fuzzy: {len(merged)}")
+
+if len(merged) > 0:
+    avg_ratings = merged.groupby('title')['rating'].mean().reset_index()
+    high_rated = avg_ratings[avg_ratings['rating'] >= 4.5]
+    print(high_rated['title'].tolist())
+
+[Outcome]    verified successful
+[db=sandbox] [2026-04-19T14:40:28.515031]
+---
+
+[Query]      Can this lead be qualified based on the latest discussions? If the answer is no, which factors—'Budget', 'Authority', 'Need', or 'Timeline'—are responsible? Return only one or several of the four BANT factors that the lead qualification fails to meet (i.e. 'Budget', 'Authority', 'Need', 'Timeline').
+
+## Lead qualification guide.
+Look for the voice call transcripts with the lead and relevant knowledge articles to justify the lead qualification.
+
+- Lead Id to be considered is: 00QWt0000089AekMAE
+[Failure]    query_db exception: Query error: HTTP 404: {"status":"Not Found","error":"invalid tool name: tool with name \"duckdb_crmarenapro_query\" does not exist"}
+[Root Cause] agentic_runtime_error
+[Fix]        Corrected query_db payload:
+SELECT * FROM knowledge__kav
+[Outcome]    verified successful
+[db=sales_pipeline] [2026-04-19T14:42:48.010721]
+---
+
+[Query]      Can this lead be qualified based on the latest discussions? If the answer is no, which factors—'Budget', 'Authority', 'Need', or 'Timeline'—are responsible? Return only one or several of the four BANT factors that the lead qualification fails to meet (i.e. 'Budget', 'Authority', 'Need', 'Timeline').
+
+## Lead qualification guide.
+Look for the voice call transcripts with the lead and relevant knowledge articles to justify the lead qualification.
+
+- Lead Id to be considered is: 00QWt0000089AekMAE
+[Failure]    query_db exception: Query error: HTTP 404: {"status":"Not Found","error":"invalid tool name: tool with name \"duckdb_crmarenapro_query\" does not exist"}
+[Root Cause] agentic_runtime_error
+[Fix]        Corrected query_db payload:
+SELECT * FROM Case LIMIT 1
+[Outcome]    verified successful
+[db=sales_pipeline] [2026-04-19T14:44:47.550312]
+---
+
+[Query]      Can this lead be qualified based on the latest discussions? If the answer is no, which factors—'Budget', 'Authority', 'Need', or 'Timeline'—are responsible? Return only one or several of the four BANT factors that the lead qualification fails to meet (i.e. 'Budget', 'Authority', 'Need', 'Timeline').
+
+## Lead qualification guide.
+Look for the voice call transcripts with the lead and relevant knowledge articles to justify the lead qualification.
+
+- Lead Id to be considered is: 00QWt0000089AekMAE
+[Failure]    query_db exception: Query error: HTTP 404: {"status":"Not Found","error":"invalid tool name: tool with name \"duckdb_crmarenapro_query\" does not exist"}
+[Root Cause] agentic_runtime_error
+[Fix]        Corrected query_db payload:
+SELECT * FROM sqlite_master
+[Outcome]    verified successful
+[db=sales_pipeline] [2026-04-19T14:50:14.226321]
+---
+
+[Query]      Can this lead be qualified based on the latest discussions? If the answer is no, which factors—'Budget', 'Authority', 'Need', or 'Timeline'—are responsible? Return only one or several of the four BANT factors that the lead qualification fails to meet (i.e. 'Budget', 'Authority', 'Need', 'Timeline').
+
+## Lead qualification guide.
+Look for the voice call transcripts with the lead and relevant knowledge articles to justify the lead qualification.
+
+- Lead Id to be considered is: 00QWt0000089AekMAE
+[Failure]    query_db exception: Query error: HTTP 404: {"status":"Not Found","error":"invalid tool name: tool with name \"duckdb_crmarenapro_query\" does not exist"}
+[Root Cause] agentic_runtime_error
+[Fix]        Corrected query_db payload:
+SELECT * FROM casehistory__c LIMIT 1
+[Outcome]    verified successful
+[db=activities] [2026-04-19T14:50:14.226449]
+---
+
+[Query]      Does the cost and setup of this quote comply with our company policy? If it doesn't, which knowledge article is it in conflict with? Return only the Id of the knowledge article that the quote violates. If no violation is found, return None.
+
+## Quote approval guide.
+Look for relevant knowledge articles to justify the quote approval.
+
+- Quote Id to be considered is: 0Q0Wt000001WSDVKA4
+[Failure]    query_db exception: Query error: HTTP 404: {"status":"Not Found","error":"invalid tool name: tool with name \"duckdb_crmarenapro_query\" does not exist"}
+[Root Cause] agentic_runtime_error
+[Fix]        Corrected query_db payload:
+SELECT * FROM knowledge__kav
+[Outcome]    verified successful
+[db=sales_pipeline] [2026-04-19T14:53:47.928200]
+---
+
+[Query]      Does the cost and setup of this quote comply with our company policy? If it doesn't, which knowledge article is it in conflict with? Return only the Id of the knowledge article that the quote violates. If no violation is found, return None.
+
+## Quote approval guide.
+Look for relevant knowledge articles to justify the quote approval.
+
+- Quote Id to be considered is: 0Q0Wt000001WSDVKA4
+[Failure]    execute_python exception: NameError: name 'df' is not defined. Did you mean: 'f'?
+[Root Cause] agentic_runtime_error
+[Fix]        Corrected execute_python payload:
+import pandas as pd
+df = pd.DataFrame(env['data_2'])
+print(df['title'].tolist())
+
+[Outcome]    verified successful
+[db=sandbox] [2026-04-19T14:53:47.928326]
+---
+
+[Query]      Considering only the latest release versions for each distinct NPM package, which packages are the top 5 most popular based on the Github star number, as well as their versions?
+[Failure]    execute_python exception: ModuleNotFoundError: No module named 'duckdb'
+[Root Cause] agentic_runtime_error
+[Fix]        Corrected execute_python payload:
+import sqlite3
+print("Python execution works")
+
+[Outcome]    verified successful
+[db=sandbox] [2026-04-19T15:00:31.738252]
+---
+
+[Query]      What is the average rating of all businesses located in Indianapolis, Indiana?
+[Failure]    execute_python exception: KeyError: 'indy_businesses'
+[Root Cause] agentic_runtime_error
+[Fix]        Corrected execute_python payload:
+import re
+import pandas as pd
+
+data = env['data_1']
+indy_businesses = []
+for b in data:
+    desc = b.get('description', '')
+    if re.search(r'Indianapolis,\s*IN', desc, re.IGNORECASE):
+        indy_businesses.append(b['business_id'])
+
+indy_refs = [b.replace('businessid_', 'businessref_') for b in indy_businesses]
+
+reviews = env['data_2']
+df = pd.DataFrame(reviews)
+
+indy_reviews = df[df['business_ref'].isin(indy_refs)]
+print(f"Number of reviews for Indy businesses: {len(indy_reviews)}")
+if len(indy_reviews) > 0:
+    avg_rating = indy_reviews['rating'].mean()
+    print(f"Average rating: {avg_rating}")
+else:
+    print("No reviews found.")
+
+[Outcome]    verified successful
+[db=sandbox] [2026-04-19T16:23:24.019353]
+---
+
+[Query]      Which U.S. state has the highest number of businesses that offer WiFi, and what is the average rating for those businesses?
+[Failure]    execute_python exception: KeyError: 'data_4'
+[Root Cause] agentic_runtime_error
+[Fix]        Corrected execute_python payload:
+import pandas as pd
+import re
+
+data = env['data_1']
+wifi_businesses = []
+
+for row in data:
+    if 'attributes' in row and row['attributes'] is not None:
+        if 'WiFi' in row['attributes']:
+            wifi_val = row['attributes']['WiFi']
+            if wifi_val in ["u'free'", "'free'", "u'paid'", "'paid'", "free", "paid"]:
+                desc = row.get('description', '')
+                match = re.search(r'in [^,]+, ([A-Z]{2})', desc)
+                if match:
+                    state = match.group(1)
+                    wifi_businesses.append({'business_id': row['business_id'], 'state': state})
+
+df_wifi = pd.DataFrame(wifi_businesses)
+df_ratings = pd.DataFrame(env['data_3'])
+
+df_wifi['business_ref'] = df_wifi['business_id'].apply(lambda x: 'businessref_' + x.split('_')[1])
+df_merged = pd.merge(df_wifi, df_ratings, on='business_ref', how='inner')
+
+state_counts = df_merged.groupby('state').size().reset_index(name='count')
+top_state = state_counts.sort_values('count', ascending=False).iloc[0]['state']
+
+avg_rating = df_merged[df_merged['state'] == top_state]['avg_rating'].mean()
+
+print(f"Top state: {top_state}")
+print(f"Average rating: {avg_rating}")
+
+[Outcome]    verified successful
+[db=sandbox] [2026-04-19T16:27:08.223574]
+---
+
+[Query]      Among users who registered on Yelp in 2016, which 5 business categories have received the most total reviews from those users since 2016?
+[Failure]    execute_python exception: KeyError: 'Column not found: review_count'
+[Root Cause] agentic_runtime_error
+[Fix]        Corrected execute_python payload:
+import pandas as pd
+import re
+
+df_reviews = pd.DataFrame(env['data_1'])
+df_businesses = pd.DataFrame(env['data_2'])
+
+print(df_reviews.columns)
+print(df_businesses.columns)
+
+[Outcome]    verified successful
+[db=sandbox] [2026-04-19T16:28:54.522934]
+---
+
+[Query]      Which stock index in the Asia region has exhibited the highest average intraday volatility since 2020?
+[Failure]    query_db exception: Query error: HTTP 404: {"status":"Not Found","error":"invalid tool name: tool with name \"sqlite_stockindex_query\" does not exist"}
+[Root Cause] agentic_runtime_error
+[Fix]        Corrected query_db payload:
+SELECT * FROM index_trade LIMIT 5
+[Outcome]    verified successful
+[db=indexinfo_database] [2026-04-19T16:34:41.191250]
+---
+
+[Query]      Which stock index in the Asia region has exhibited the highest average intraday volatility since 2020?
+[Failure]    execute_python exception: ModuleNotFoundError: No module named 'dateparser'
+[Root Cause] agentic_runtime_error
+[Fix]        Corrected execute_python payload:
+import pandas as pd
+
+asia_indices = ['N225', 'HSI', '000001.SS', '399001.SZ', 'TWII', 'NSEI']
+print("Asia indices:", asia_indices)
+
+[Outcome]    verified successful
+[db=sandbox] [2026-04-19T16:34:41.191380]
+---
+
+[Query]      Which stock index in the Asia region has exhibited the highest average intraday volatility since 2020?
+[Failure]    query_db exception: Query error: HTTP 500: {"error": "Conversion Error: Could not convert string '0:00' to INT32\n\nLINE 4:   AND CAST(SUBSTR(Date, -4) AS INTEGER) >= 2020\n              ^"}
+[Root Cause] agentic_runtime_error
+[Fix]        Corrected query_db payload:
+SELECT "Index", Date, Open, High, Low FROM index_trade WHERE "Index" IN ('N225', 'HSI', '000001.SS', '399001.SZ', 'TWII', 'NSEI') AND (Date LIKE '%2020%' OR Date LIKE '%2021%' OR Date LIKE '%2022%' OR Date LIKE '%2023%' OR Date LIKE '%2024%')
+[Outcome]    verified successful
+[db=indextrade_database] [2026-04-19T16:34:41.191440]
+---
+
+[Query]      Which stock index in the Asia region has exhibited the highest average intraday volatility since 2020?
+[Failure]    execute_python exception: KeyError: 'data_6'
+[Root Cause] agentic_runtime_error
+[Fix]        Corrected execute_python payload:
+print(env.keys())
+[Outcome]    verified successful
+[db=sandbox] [2026-04-19T16:34:41.191483]
+---
+
+[Query]      If an investor had made regular monthly investments in all indices since 2000, which 5 indices would have produced the highest overall returns, and what countries do they belong to?
+[Failure]    query_db exception: Query error: HTTP 404: {"status":"Not Found","error":"invalid tool name: tool with name \"sqlite_stockindex_query\" does not exist"}
+[Root Cause] agentic_runtime_error
+[Fix]        Corrected query_db payload:
+SELECT * FROM index_trade LIMIT 5
+[Outcome]    verified successful
+[db=indexinfo_database] [2026-04-19T16:39:12.964134]
+---
+
+[Query]      If an investor had made regular monthly investments in all indices since 2000, which 5 indices would have produced the highest overall returns, and what countries do they belong to?
+[Failure]    query_db exception: Query error: Remote end closed connection without response
+[Root Cause] agentic_runtime_error
+[Fix]        Corrected query_db payload:
+SELECT "Index", "Date", "CloseUSD" FROM index_trade LIMIT 10
+[Outcome]    verified successful
+[db=indextrade_database] [2026-04-19T16:39:12.964269]
+---
+
+[Query]      Identify the CPC technology areas with the highest exponential moving average of patent filings each year (smoothing factor 0.2), and return only the CPC group codes at level 5 whose best year is 2022.
+[Failure]    query_db exception: Query error: HTTP 404: {"status":"Not Found","error":"invalid tool name: tool with name \"sqlite_query\" does not exist"}
+[Root Cause] agentic_runtime_error
+[Fix]        Corrected query_db payload:
+SELECT symbol FROM cpc_definition WHERE level = 5
+[Outcome]    verified successful
+[db=publication_database] [2026-04-19T16:40:46.595657]
+---
+
+[Query]      Identify the CPC technology areas with the highest exponential moving average of patent filings each year (smoothing factor 0.2), and return only the CPC group codes at level 5 whose best year is 2022.
+[Failure]    execute_python exception: KeyError: 'filing_date'
+[Root Cause] agentic_runtime_error
+[Fix]        Corrected execute_python payload:
+import pandas as pd
+print(env['data_1'][0].keys())
+
+[Outcome]    verified successful
+[db=sandbox] [2026-04-19T16:40:46.595777]
+---
+
+[Query]      Identify the CPC technology areas with the highest exponential moving average of patent filings each year (smoothing factor 0.2), and return only the CPC group codes at level 5 whose best year is 2022.
+[Failure]    query_db exception: Query error: HTTP 404: {"status":"Not Found","error":"invalid tool name: tool with name \"sqlite_query\" does not exist"}
+[Root Cause] agentic_runtime_error
+[Fix]        Corrected query_db payload:
+SELECT symbol FROM cpc_definition WHERE level = 5
+[Outcome]    verified successful
+[db=publication_database] [2026-04-19T16:44:46.905610]
+---
+
+[Query]      Identify the CPC technology areas with the highest exponential moving average of patent filings each year (smoothing factor 0.2), and return only the CPC group codes at level 5 whose best year is 2022.
+[Failure]    execute_python exception: KeyError: 'data_3'
+[Root Cause] agentic_runtime_error
+[Fix]        Corrected execute_python payload:
+print(env.keys())
+[Outcome]    verified successful
+[db=sandbox] [2026-04-19T16:44:46.905736]
+---
+
+[Query]      Identify the CPC technology areas with the highest exponential moving average of patent filings each year (smoothing factor 0.2), and return only the CPC group codes at level 5 whose best year is 2022.
+[Failure]    query_db exception: Query error: HTTP 404: {"status":"Not Found","error":"invalid tool name: tool with name \"sqlite_query\" does not exist"}
+[Root Cause] agentic_runtime_error
+[Fix]        Corrected query_db payload:
+SELECT symbol FROM cpc_definition WHERE level = 5
+[Outcome]    verified successful
+[db=publication_database] [2026-04-19T16:44:46.905799]
+---
+
+[Query]      Identify the CPC technology areas with the highest exponential moving average of patent filings each year (smoothing factor 0.2), and return only the CPC group codes at level 5 whose best year is 2022.
+[Failure]    execute_python exception: KeyError: 'data_4'
+[Root Cause] agentic_runtime_error
+[Fix]        Corrected execute_python payload:
+print(env.keys())
+[Outcome]    verified successful
+[db=sandbox] [2026-04-19T16:44:46.905839]
+---
