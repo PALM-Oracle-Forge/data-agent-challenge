@@ -18,13 +18,21 @@ Architecture:
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from agent.llm_client import LLMClient, LLMToolCall, LLMToolCallResponse
 from agent.sandbox_client import SandboxClient
 from agent.types import SandboxExecutionRequest
+
+TOOL_LOG_MAX_PREVIEW = 10_000  # matches DAB BaseTool.exec truncation
+
+DEFAULT_MAX_TOKENS = 16384
+LENGTH_RETRY_MAX_TOKENS = 32768  # one-shot bump when backend returns stop_reason=length
 
 
 # ── Result dataclass ───────────────────────────────────────────────────────────
@@ -49,6 +57,14 @@ class AgenticResult:
     answer: str
     terminate_reason: str
     iterations: int
+    total_usage: Dict[str, Any] = field(default_factory=lambda: {
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_creation_tokens": 0,
+        "cost": 0.0,
+    })
     trace: List[Dict[str, Any]] = field(default_factory=list)
     messages: List[Dict[str, Any]] = field(default_factory=list)
 
@@ -65,6 +81,13 @@ AGENTIC_TOOLS: List[Dict[str, Any]] = [
             "Execute a SQL or MongoDB query against a named database. "
             "Returns the query results as JSON rows. "
             "IMPORTANT: MongoDB queries also support aggregation pipelines (list of stages). "
+            "The environment 'env' is a dictionary: { 'data_1': [ {col: val, ...}, ... ], ... }. "
+            "- IMPORTANT: DATA TENACITY. If your analytics result in very few matches (e.g., zero or only a handful of rows), do NOT give up. Instead: "
+            "1. Print the length of the input dataframes: `print(len(env['data_1']))`. "
+            "2. Check for parsing errors in your logic (e.g., regex mismatches in unstructured fields). "
+            "3. Try alternative extraction patterns. "
+            "4. Only return 'Unable to determine answer' if you have confirmed the database actually contains no matching records after multiple checks. "
+            "- ABSOLUTELY NEVER return an answer as plain text if you are still missing data or encounter errors. Use another `query_db` or `execute_python` step to debug and fix. "
             "The result is saved to env['data_N'] where N is unique per query."
         ),
         "input_schema": {
@@ -110,7 +133,8 @@ AGENTIC_TOOLS: List[Dict[str, Any]] = [
             "Execute a Python script to process data (join, filter, aggregate). "
             "A dictionary named 'env' is pre-loaded with results of ALL previous queries. "
             "Example: env['data_1'], env['data_2']. "
-            "YOU MUST ALWAYS use print() to output your findings (e.g. print(df.head())). "
+            "YOU MUST ALWAYS use print() for summaries or final results (e.g. print(df.groupby('decade').size())). "
+            "Avoid printing thousands of raw rows; use head() or value_counts() to keep context clean. "
             "Available libs: pandas, numpy, rapidfuzz, re, json, math."
         ),
         "input_schema": {
@@ -154,6 +178,13 @@ Your job is to answer the user's question by:
 2. Using query_db to execute SQL or MongoDB queries against the databases
 3. Analyzing the results and calling return_answer with the final answer
 
+Data Tenacity & Verification:
+- If your analytics result in very few matches (e.g., zero or only a handful of rows for a large dataset), do NOT give up. 
+- You MUST print the length of your environment variables: `print(len(env['data_1']))` to confirm data volume.
+- If data volume is significant but matches are few, check for parsing errors (e.g., regex mismatches in unstructured fields) and try alternative extraction patterns.
+- ONLY return 'Unable to determine answer' if you have confirmed the database actually contains no matching records after multiple verification steps.
+- ABSOLUTELY NEVER return an answer as plain text if you are still missing data or encounter processing errors. Use another `execute_python` step to debug and fix.
+
 Rules:
 - Read the "Domain Knowledge" section carefully. It contains required CROSS-DATABASE JOIN KEY mappings.
 - Always explore the schema (list_db) before querying if table/column names are unclear.
@@ -161,10 +192,15 @@ Rules:
 - If you need to join data across TWO DIFFERENT DATABASES, you MUST query each database separately, then use the `execute_python` tool to merge the data using pandas. SQL cannot cross database boundaries here.
 - DO NOT SELECT * for large tables. Push filters down to SQL.
 - If a query returns an error, fix it and try again.
-- Call return_answer with a concise final value (number, string, or list).
 - IMPORTANT: Data returned by `query_db` is ALREADY a Python list/dict whenever possible. DO NOT use `json.loads()` on variables from the `env` dictionary unless the preview specifically shows a raw escaped JSON string.
 - For MongoDB/Yelp databases use query_type="mongo" with a JSON filter object.
 - For all other databases use query_type="sql" with standard SQL.
+
+FINALIZING YOUR ANSWER — MANDATORY:
+- Every turn MUST contain a tool call. Plain-text responses are rejected by the runtime.
+- When you know the answer, you MUST call `return_answer` with the final value. Do NOT write the answer as narrative text in the assistant message — the harness only records `return_answer` tool calls as the final answer.
+- The answer you pass to `return_answer` MUST be the literal value (a number, string, or compact list) that the grader will match against ground truth — no sentence framing like "The answer is X", just X.
+- If analysis is still needed, call `query_db` or `execute_python`; never stop early with a hedge like "Unable to determine answer" unless you have exhausted reasonable verification steps.
 """
 
 
@@ -208,6 +244,7 @@ class AgenticLoop:
         kb_context: str = "",
         max_iterations: int = 20,
         sandbox_client: Optional[SandboxClient] = None,
+        log_dir: Optional[Path] = None,
     ):
         self._toolbox = toolbox
         self._db_configs = db_configs
@@ -218,6 +255,75 @@ class AgenticLoop:
         self._sandbox_client = sandbox_client
         self._query_results: Dict[str, Any] = {}
         self._dataset_counter = 0
+
+        # DAB-format JSONL loggers. When log_dir is None, all `_log_*` calls are no-ops.
+        self._log_dir = Path(log_dir) if log_dir else None
+        self._llm_log_path: Optional[Path] = None
+        self._tool_log_path: Optional[Path] = None
+        if self._log_dir is not None:
+            self._log_dir.mkdir(parents=True, exist_ok=True)
+            self._llm_log_path = self._log_dir / "llm_calls.jsonl"
+            self._tool_log_path = self._log_dir / "tool_calls.jsonl"
+
+    # ── DAB-format logging helpers (no-op when log_dir is None) ─────────────
+
+    def _log_llm_call(
+        self,
+        start: float,
+        end: float,
+        response: Optional[LLMToolCallResponse],
+        messages: List[Dict[str, Any]],
+    ) -> None:
+        if self._llm_log_path is None:
+            return
+        response_dict: Optional[Dict[str, Any]] = None
+        if response is not None:
+            response_dict = {
+                "text": response.text,
+                "stop_reason": response.stop_reason,
+                "usage": response.usage,
+                "tool_calls": [
+                    {"id": tc.id, "name": tc.name, "arguments": tc.input}
+                    for tc in response.tool_calls
+                ],
+            }
+        entry = {
+            "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
+            "start_time": start,
+            "end_time": end,
+            "duration": end - start,
+            "model": getattr(self._client, "_openrouter_model", None),
+            "response": response_dict,
+            "messages": messages,
+        }
+        with open(self._llm_log_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, default=str) + "\n")
+
+    def _log_tool_call(
+        self,
+        tool_name: str,
+        args: Dict[str, Any],
+        success: bool,
+        result_payload: Any,
+        start_ts: str,
+        end_ts: str,
+        elapsed: float,
+    ) -> None:
+        if self._tool_log_path is None:
+            return
+        serialized = json.dumps(result_payload, default=str)
+        preview = serialized[:TOOL_LOG_MAX_PREVIEW]
+        entry = {
+            "start": start_ts,
+            "end": end_ts,
+            "time": elapsed,
+            "tool_name": tool_name,
+            "result": {"success": success, "preview": preview},
+            "args": args,
+            "val_args": args,
+        }
+        with open(self._tool_log_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(entry, default=str) + "\n")
 
     def run(self, question: str, available_databases: List[str]) -> AgenticResult:
         """
@@ -247,26 +353,101 @@ class AgenticLoop:
         terminate_reason = "max_iterations"
         trace: List[Dict[str, Any]] = []
         iteration = 0
+        total_usage = {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "cache_read_tokens": 0,
+            "cache_creation_tokens": 0,
+            "cost": 0.0,
+        }
 
         while final_answer is None and iteration < self.max_iterations:
             iteration += 1
 
             # Call LLM with tool definitions
+            llm_start = time.time()
             response: LLMToolCallResponse = self._client.create_with_tools(
                 messages=messages,
                 tools=AGENTIC_TOOLS,
-                max_tokens=1024,
+                max_tokens=DEFAULT_MAX_TOKENS,
                 temperature=0.0,
                 system=self._system_prompt,
             )
+            llm_end = time.time()
+            self._log_llm_call(llm_start, llm_end, response, messages)
+
+            # If the backend truncated us before any tool call was emitted,
+            # retry once with a bigger output budget. Thinking models can burn
+            # the whole output cap on reasoning and emit nothing. Retrying with
+            # the same messages but a higher max_tokens lets them finish.
+            if (
+                not response.has_tool_calls
+                and str(response.stop_reason).lower() == "length"
+            ):
+                llm_start = time.time()
+                response = self._client.create_with_tools(
+                    messages=messages,
+                    tools=AGENTIC_TOOLS,
+                    max_tokens=LENGTH_RETRY_MAX_TOKENS,
+                    temperature=0.0,
+                    system=self._system_prompt,
+                )
+                llm_end = time.time()
+                self._log_llm_call(llm_start, llm_end, response, messages)
+
+            # Accumulate usage (cache_read_tokens / cache_creation_tokens are
+            # populated by LLMClient when the backend supports prompt caching).
+            u = response.usage
+            total_usage["prompt_tokens"] += u.get("prompt_tokens", 0)
+            total_usage["completion_tokens"] += u.get("completion_tokens", 0)
+            total_usage["total_tokens"] += u.get("total_tokens", 0)
+            total_usage["cache_read_tokens"] += u.get("cache_read_tokens", 0)
+            total_usage["cache_creation_tokens"] += u.get("cache_creation_tokens", 0)
+            total_usage["cost"] += u.get("cost", 0.0)
 
             if not response.has_tool_calls:
-                # LLM returned plain text without a tool call — use as answer (fallback)
-                final_answer = response.text or ""
-                terminate_reason = "no_tool_call"
-                # Append assistant response to conversation
-                messages.append({"role": "assistant", "content": response.text})
-                break
+                # Plain text is never accepted as a final answer — the harness
+                # only records `return_answer` tool calls. Push back every turn
+                # and rely on max_iterations as the safety net.
+                loaded_keys = list(self._query_results.keys())
+                if loaded_keys:
+                    env_hint = (
+                        f" You have already loaded data into: {', '.join(loaded_keys)}. "
+                        "Use `execute_python` to analyze it, or call `return_answer` "
+                        "with the final value if you already have it."
+                    )
+                else:
+                    env_hint = (
+                        " Use `query_db` to fetch data, `list_db` to explore schema, "
+                        "or `return_answer` if you already have the final value."
+                    )
+
+                length_hint = ""
+                if str(response.stop_reason).lower() == "length":
+                    length_hint = (
+                        " Your last response was cut off by the output-token limit "
+                        "even after a retry. Respond with a single tool call only — "
+                        "no prose, no multi-step reasoning in the reply text. If a "
+                        "batch is too large to classify in one turn, slice it in "
+                        "Python and process chunks."
+                    )
+
+                error_msg = (
+                    "Error: every turn must contain a tool call. Plain text is not "
+                    "recorded as an answer." + env_hint + length_hint + " If you "
+                    "have the final answer, call `return_answer(answer=<value>)` — "
+                    "do not write it as narrative text."
+                )
+                messages.append({"role": "user", "content": error_msg})
+                trace.append({
+                    "iteration": iteration,
+                    "tool": "system_reminder",
+                    "input": {},
+                    "output": error_msg,
+                    "success": False,
+                })
+                continue
 
             # Build assistant message with tool calls (OpenAI-style)
             assistant_tool_calls = []
@@ -287,15 +468,28 @@ class AgenticLoop:
 
             # Execute each tool call and append results
             for tc in response.tool_calls:
+                tool_start_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                tool_start = time.time()
                 result_content, success = self._execute_tool(
                     tc, available_databases, iteration
+                )
+                tool_end = time.time()
+                tool_end_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+                self._log_tool_call(
+                    tool_name=tc.name,
+                    args=tc.input,
+                    success=success,
+                    result_payload=result_content,
+                    start_ts=tool_start_ts,
+                    end_ts=tool_end_ts,
+                    elapsed=tool_end - tool_start,
                 )
 
                 trace.append({
                     "iteration": iteration,
                     "tool": tc.name,
                     "input": tc.input,
-                    "output": result_content[:500],  # truncate for trace
+                    "output": result_content[:2000],  # truncate for trace
                     "success": success,
                 })
 
@@ -324,6 +518,7 @@ class AgenticLoop:
             answer=final_answer,
             terminate_reason=terminate_reason,
             iterations=iteration,
+            total_usage=total_usage,
             trace=trace,
             messages=messages,
         )
@@ -382,14 +577,20 @@ class AgenticLoop:
             return f"Error: no MCP tool found for database '{database}' ({query_type}).", False
 
         try:
-            result = self._toolbox.call_tool(mcp_tool, {"sql": query})
+            # Package parameters based on query type
+            if query_type == "mongo":
+                params = {"database": database, "query": query, "query_type": "mongo"}
+            else:
+                params = {"sql": query, "database": database}
+
+            result = self._toolbox.call_tool(mcp_tool, params)
             if result.success:
                 self._dataset_counter += 1
                 data_key = f"data_{self._dataset_counter}"
                 self._query_results[data_key] = result.data
 
                 data_str = json.dumps(result.data, default=str)
-                preview = data_str[:2000] + "\n... (truncated)" if len(data_str) > 2000 else data_str
+                preview = data_str[:5000] + "\n... (truncated)" if len(data_str) > 5000 else data_str
                 
                 msg = (
                     f"Query successful. Full dataset saved to env['{data_key}'] for use in execute_python.\n"
@@ -500,47 +701,23 @@ class AgenticLoop:
         """
         Map a database identifier + query_type to the MCPToolbox tool name.
 
-        Uses the db_config's explicit mcp_tool if set, otherwise derives from
-        MCPToolbox's default_source_map conventions.
+        Uses the db_config's explicit mcp_tool if set (from tools.yaml), 
+        otherwise falls back to engine-based defaults.
         """
         db_config = self._db_configs.get(database, {})
-        explicit = db_config.get("mcp_tool", "")
+        explicit = db_config.get("mcp_tool")
         if explicit:
             return explicit
 
         db_type = db_config.get("type", "").lower()
 
-        # MongoDB (Yelp) uses find_yelp_businesses / find_yelp_checkins
-        if db_type == "mongodb" or database == "yelp_db":
-            return "find_yelp_businesses"
-
-        # DuckDB datasets
-        if db_type == "duckdb" or database in ("user_database", "review_database", "sales_database"):
-            duckdb_tool_map = {
-                "user_database": "duckdb_yelp_query",
-                "review_database": "duckdb_yelp_query", # fallback for yelp
-                "sales_database": "duckdb_crm_sales_pipeline_query",
-                "stockmarket": "duckdb_stockmarket_query",
-                "stockindex": "duckdb_stockindex_query",
-                "music_brainz_20k": "duckdb_music_brainz_query",
-                "DEPS_DEV_V1": "duckdb_deps_dev_v1_query",
-                "GITHUB_REPOS": "duckdb_github_repos_query",
-                "PANCANCER_ATLAS": "duckdb_pancancer_query",
-                "crmarenapro": "duckdb_crm_activities_query",
-            }
-            return duckdb_tool_map.get(database, "duckdb_query")
-
-        # SQLite datasets
-        if db_type == "sqlite" or "metadata" in database.lower():
-            sqlite_tool_map = {
-                "bookreview": "sqlite_bookreview_query",
-                "review_database": "sqlite_bookreview_query", # fallback
-                "googlelocal": "sqlite_googlelocal_query",
-                "agnews": "sqlite_agnews_query",
-            }
-            return sqlite_tool_map.get(database, "sqlite_query")
-
-        # PostgreSQL
+        # Engine-based fallbacks if no explicit tool is configured
+        if db_type == "mongodb":
+            return "mongodb_query"
+        if db_type == "duckdb":
+            return "duckdb_query"
+        if db_type == "sqlite":
+            return "sqlite_query"
         if db_type in ("postgres", "postgresql"):
             return "run_query"
 
