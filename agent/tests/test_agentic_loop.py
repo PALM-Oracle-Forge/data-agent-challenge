@@ -232,172 +232,6 @@ class TestLLMClientCreateWithToolsOpenRouter:
                 tools=AGENTIC_TOOLS,
             )
 
-    def test_prompt_caching_adds_cache_control_on_large_user_message(self):
-        """Large first user message must get a cache_control marker on Anthropic-routed models."""
-        client = self._make_client()
-        self._mock_response(client, {
-            "choices": [{"message": {"content": "", "tool_calls": []}, "finish_reason": "stop"}]
-        })
-        big_content = "x" * 5000  # above _CACHE_MIN_CHARS = 4000
-        with patch.dict("os.environ", {"OPENROUTER_MODEL": "anthropic/claude-sonnet-4-6"}):
-            client.create_with_tools(
-                messages=[{"role": "user", "content": big_content}],
-                tools=AGENTIC_TOOLS,
-                system="Sys",
-            )
-        sent = client._session.post.call_args[1]["json"]
-        # First user is at index 1 (system at 0); its content must be a list
-        # with cache_control on the last text block.
-        user_msg = sent["messages"][1]
-        assert user_msg["role"] == "user"
-        assert isinstance(user_msg["content"], list)
-        assert user_msg["content"][-1].get("cache_control") == {"type": "ephemeral"}
-
-    def test_prompt_caching_skipped_for_non_anthropic_models(self):
-        """cache_control must NOT be sent to OpenAI / Mistral / etc.
-
-        Those providers don't honour the marker and the resulting content-as-list
-        format with the unknown field has destabilised tool-calling in the past.
-        """
-        client = self._make_client()
-        self._mock_response(client, {
-            "choices": [{"message": {"content": "", "tool_calls": []}, "finish_reason": "stop"}]
-        })
-        big_content = "x" * 5000
-        with patch.dict("os.environ", {"OPENROUTER_MODEL": "openai/gpt-4-turbo"}):
-            client.create_with_tools(
-                messages=[{"role": "user", "content": big_content}],
-                tools=AGENTIC_TOOLS,
-            )
-        sent = client._session.post.call_args[1]["json"]
-        # Content must remain a plain string for OpenAI.
-        assert sent["messages"][0]["content"] == big_content
-
-    def test_prompt_caching_skips_small_user_message(self):
-        """Messages below the min-size threshold should NOT be wrapped."""
-        client = self._make_client()
-        self._mock_response(client, {
-            "choices": [{"message": {"content": "", "tool_calls": []}, "finish_reason": "stop"}]
-        })
-        with patch.dict("os.environ", {"OPENROUTER_MODEL": "anthropic/claude-sonnet-4-6"}):
-            client.create_with_tools(
-                messages=[{"role": "user", "content": "tiny"}],
-                tools=AGENTIC_TOOLS,
-            )
-        sent = client._session.post.call_args[1]["json"]
-        # Content stays a string (not wrapped) because it's below the threshold
-        assert sent["messages"][0]["content"] == "tiny"
-
-    def test_prompt_caching_disabled_when_enable_caching_false(self):
-        """enable_caching=False must leave the payload untouched even on Anthropic."""
-        client = self._make_client()
-        self._mock_response(client, {
-            "choices": [{"message": {"content": "", "tool_calls": []}, "finish_reason": "stop"}]
-        })
-        big_content = "x" * 5000
-        with patch.dict("os.environ", {"OPENROUTER_MODEL": "anthropic/claude-sonnet-4-6"}):
-            client.create_with_tools(
-                messages=[{"role": "user", "content": big_content}],
-                tools=AGENTIC_TOOLS,
-                enable_caching=False,
-            )
-        sent = client._session.post.call_args[1]["json"]
-        assert sent["messages"][0]["content"] == big_content
-
-    def test_usage_normalization_surfaces_cache_tokens(self):
-        """OpenAI-style prompt_tokens_details.cached_tokens must reach the caller."""
-        client = self._make_client()
-        self._mock_response(client, {
-            "choices": [{"message": {"content": "ok", "tool_calls": []}, "finish_reason": "stop"}],
-            "usage": {
-                "prompt_tokens": 1000,
-                "completion_tokens": 50,
-                "total_tokens": 1050,
-                "prompt_tokens_details": {"cached_tokens": 800},
-            },
-        })
-        resp = client.create_with_tools(
-            messages=[{"role": "user", "content": "q"}],
-            tools=AGENTIC_TOOLS,
-        )
-        assert resp.usage["prompt_tokens"] == 1000
-        assert resp.usage["cache_read_tokens"] == 800
-
-    def test_usage_normalization_handles_anthropic_cache_fields(self):
-        """Anthropic-style cache_read_input_tokens (via OpenRouter) must be surfaced."""
-        client = self._make_client()
-        self._mock_response(client, {
-            "choices": [{"message": {"content": "ok", "tool_calls": []}, "finish_reason": "stop"}],
-            "usage": {
-                "prompt_tokens": 2000,
-                "completion_tokens": 30,
-                "total_tokens": 2030,
-                "cache_read_input_tokens": 1500,
-                "cache_creation_input_tokens": 200,
-            },
-        })
-        resp = client.create_with_tools(
-            messages=[{"role": "user", "content": "q"}],
-            tools=AGENTIC_TOOLS,
-        )
-        assert resp.usage["cache_read_tokens"] == 1500
-        assert resp.usage["cache_creation_tokens"] == 200
-
-
-# ── Prompt-caching helpers (unit) ────────────────────────────────────────────
-
-class TestWithCacheControl:
-    """Direct unit tests for the _with_cache_control helper."""
-
-    def test_empty_messages_passthrough(self):
-        from agent.llm_client import _with_cache_control
-        assert _with_cache_control([]) == []
-
-    def test_no_user_message_passthrough(self):
-        from agent.llm_client import _with_cache_control
-        msgs = [{"role": "system", "content": "s"}]
-        assert _with_cache_control(msgs) == msgs
-
-    def test_small_user_content_passthrough(self):
-        from agent.llm_client import _with_cache_control
-        msgs = [{"role": "user", "content": "tiny"}]
-        out = _with_cache_control(msgs)
-        assert out[0]["content"] == "tiny"  # untouched
-
-    def test_large_string_content_wrapped(self):
-        from agent.llm_client import _with_cache_control
-        msgs = [{"role": "user", "content": "x" * 5000}]
-        out = _with_cache_control(msgs)
-        assert isinstance(out[0]["content"], list)
-        assert out[0]["content"][0]["cache_control"] == {"type": "ephemeral"}
-        # Original list not mutated
-        assert msgs[0]["content"] == "x" * 5000
-
-    def test_idempotent_on_already_marked(self):
-        from agent.llm_client import _with_cache_control
-        msgs = [{
-            "role": "user",
-            "content": [{
-                "type": "text",
-                "text": "x" * 5000,
-                "cache_control": {"type": "ephemeral"},
-            }],
-        }]
-        out = _with_cache_control(msgs)
-        # Still exactly one marker
-        markers = [b for b in out[0]["content"] if "cache_control" in b]
-        assert len(markers) == 1
-
-    def test_finds_first_user_after_system(self):
-        from agent.llm_client import _with_cache_control
-        msgs = [
-            {"role": "system", "content": "s"},
-            {"role": "user", "content": "x" * 5000},
-        ]
-        out = _with_cache_control(msgs)
-        assert out[0] == msgs[0]  # system untouched
-        assert isinstance(out[1]["content"], list)
-
 
 # ── AgenticLoop.run() ─────────────────────────────────────────────────────────
 
@@ -435,18 +269,15 @@ class TestAgenticLoopRun:
         assert result.terminate_reason == "return_answer"
         assert result.iterations == 1
 
-    def test_no_tool_call_is_rejected_and_loop_pushes_back(self):
-        """LLM returning plain text is never accepted as an answer; the loop
-        pushes back every turn and eventually hits max_iterations."""
+    def test_no_tool_call_fallback_uses_text_as_answer(self):
+        """LLM returns plain text without a tool call — treated as final answer."""
         loop = _make_loop([
             _make_tool_response([], text="The answer is 7", stop_reason="end_turn")
-            for _ in range(5)
         ])
         result = loop.run("What is 3+4?", ["testdb"])
 
-        assert result.answer == ""
-        assert result.terminate_reason == "max_iterations"
-        assert all(step["tool"] == "system_reminder" for step in result.trace)
+        assert result.answer == "The answer is 7"
+        assert result.terminate_reason == "no_tool_call"
 
     def test_query_db_then_return_answer(self):
         """LLM queries DB, gets result, then answers. Toolbox called once."""

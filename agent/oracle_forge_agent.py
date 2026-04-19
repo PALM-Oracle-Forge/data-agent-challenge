@@ -29,10 +29,10 @@ from agent.sandbox_client import SandboxClient
 from agent.self_correction import SelfCorrectionLoop
 from eval.harness import EvaluationHarness
 
-load_dotenv(override=True)
+load_dotenv()
 
 # DAB datasets that live in MongoDB (served via HTTP toolbox)
-_MONGODB_DATASETS = {"yelp", "agnews"}
+_MONGODB_DATASETS = {"yelp"}
 
 # DAB datasets that live in PostgreSQL (served via HTTP toolbox)
 _POSTGRES_DATASETS = set()
@@ -452,7 +452,6 @@ class OracleForgeAgent:
         question = dab_input["question"]
         available_databases = dab_input.get("available_databases") or list(self._db_configs.keys())
         hints = dab_input.get("hints", "")
-        log_dir = dab_input.get("log_dir")
 
         # Auto-discover connection configs for any unknown dataset names
         self._resolve_missing_db_configs(available_databases)
@@ -472,24 +471,12 @@ class OracleForgeAgent:
         prior_corrections = self._ctx_manager.get_similar_corrections(question)
         correction_applied_proactively = len(prior_corrections) > 0
 
-        # Layer 2 dataset-scoped: inject per-dataset slices of the large KB
-        # files (schema.md, dataset_overview.md, unstructured_field_inventory.md).
-        # These are NOT in _DOMAIN_ALWAYS_LOAD; they're built here for each query.
-        scoped_docs = self._ctx_manager.get_dataset_scoped_docs(available_databases)
-
         # Layer 2 on-demand: inject domain docs triggered by question keywords.
-        # Pass scoped sources to avoid re-injecting a file we've just scoped.
         on_demand_docs = self._ctx_manager.get_docs_for_question(question)
-
-        injected = scoped_docs + on_demand_docs
-        if injected:
-            injected_sources = {d.source for d in injected}
+        if on_demand_docs:
             context = _dc_replace(
                 context,
-                institutional_knowledge=[
-                    d for d in context.institutional_knowledge
-                    if d.source not in injected_sources
-                ] + injected,
+                institutional_knowledge=context.institutional_knowledge + on_demand_docs,
             )
 
         # ── Agentic mode (default): LLM drives every step ──────────────────
@@ -501,7 +488,6 @@ class OracleForgeAgent:
                 prior_corrections=prior_corrections,
                 correction_applied_proactively=correction_applied_proactively,
                 hints=hints,
-                log_dir=log_dir,
             )
 
         # ── Structured mode: pre-planned QueryRouter pipeline ──────────────
@@ -590,7 +576,6 @@ class OracleForgeAgent:
         prior_corrections: list,
         correction_applied_proactively: bool,
         hints: str = "",
-        log_dir: Optional[Any] = None,
     ) -> Dict[str, Any]:
         """
         Run the DAB-runner-style agentic loop for this question.
@@ -623,12 +608,8 @@ class OracleForgeAgent:
             kb_context=kb_context,
             max_iterations=self._max_iterations,
             sandbox_client=self._sandbox_client,
-            log_dir=log_dir,
         )
         result: AgenticResult = loop.run(question, available_databases)
-
-        # Expose the full message trace so run_agent.py can persist it into final_agent.json.
-        self._last_messages = list(result.messages)
 
         # Convert termination reason to confidence score
         if result.terminate_reason == "return_answer":
@@ -696,7 +677,6 @@ class OracleForgeAgent:
             "correction_applied": correction_applied_proactively,
             "terminate_reason": result.terminate_reason,
             "iterations": result.iterations,
-            "usage": result.total_usage,
         }
 
     # ── Answer synthesis (task 10.2) ──────────────────────────────────────────

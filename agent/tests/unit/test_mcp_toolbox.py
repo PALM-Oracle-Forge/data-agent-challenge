@@ -10,7 +10,7 @@ class FakeResponse:
         self._payload = json.dumps(payload).encode("utf-8")
         self.status = status
 
-    def read(self, *args, **kwargs) -> bytes:
+    def read(self) -> bytes:
         return self._payload
 
     def __enter__(self) -> "FakeResponse":
@@ -63,22 +63,64 @@ class MCPToolboxTests(unittest.TestCase):
         request = urlopen_mock.call_args.args[0]
         self.assertEqual(request.full_url, "http://127.0.0.1:8001/api/tool/duckdb_query/invoke")
 
-    def test_call_tool_routes_mongodb_queries_to_http(self) -> None:
+    def test_call_tool_routes_mongodb_queries_to_direct_client(self) -> None:
         client = MCPToolbox("http://127.0.0.1:5000")
-        payload = {"result": [{"_id": "oid123", "is_open": 1}]}
 
-        with patch("agent.mcp_toolbox.urllib.request.urlopen", return_value=FakeResponse(payload)) as urlopen_mock:
-            # MCPToolbox defaults run_query to postgres, but mongodb_query* go to mongodb via HTTP Toolbox.
-            result = client.call_tool("mongodb_query_yelp_business", {"pipeline": '[{"$match": {"is_open": 1}}]'})
+        with patch.object(client, "_call_mongodb_direct") as mongo_mock:
+            mongo_mock.return_value = type("Result", (), {"success": True, "data": [], "error": None, "execution_time": 0.0, "source_type": "", "tool_name": ""})()
+            result = client.call_tool("find_yelp_businesses", {"filterPayload": "{}", "limit": 10})
+
+        mongo_mock.assert_called_once_with("find_yelp_businesses", {"filterPayload": "{}", "limit": 10})
+        self.assertTrue(result.success)
+        self.assertEqual(result.source_type, "mongodb")
+        self.assertEqual(result.tool_name, "find_yelp_businesses")
+
+    def test_call_mongodb_direct_parses_filter_and_sanitizes_object_id(self) -> None:
+        client = MCPToolbox("http://127.0.0.1:5000")
+
+        class FakeObjectId:
+            def __str__(self) -> str:
+                return "oid123"
+
+        class FakeCursor:
+            def __init__(self, docs):
+                self._docs = docs
+
+            def limit(self, limit_value):
+                return self._docs[:limit_value]
+
+        class FakeCollection:
+            def find(self, query_filter):
+                assert query_filter == {"is_open": 1}
+                return FakeCursor([{"_id": FakeObjectId(), "is_open": 1}])
+
+        class FakeDatabase:
+            def __getitem__(self, collection_name):
+                assert collection_name == "business"
+                return FakeCollection()
+
+        class FakeMongoClient:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return None
+
+            def __getitem__(self, database_name):
+                assert database_name == "yelp_db"
+                return FakeDatabase()
+
+        with patch("agent.mcp_toolbox.MongoClient", FakeMongoClient):
+            result = client._call_mongodb_direct(
+                "find_yelp_businesses",
+                {"filterPayload": '{"is_open": 1}', "limit": 5},
+            )
 
         self.assertTrue(result.success)
         self.assertEqual(result.data, [{"_id": "oid123", "is_open": 1}])
-        self.assertEqual(result.source_type, "mongodb")
-        self.assertEqual(result.tool_name, "mongodb_query_yelp_business")
-        
-        request = urlopen_mock.call_args.args[0]
-        self.assertEqual(request.full_url, "http://127.0.0.1:5000/api/tool/mongodb_query_yelp_business/invoke")
-        self.assertEqual(request.get_method(), "POST")
 
     def test_verify_connections_reports_http_and_duckdb(self) -> None:
         client = MCPToolbox("http://127.0.0.1:5000")

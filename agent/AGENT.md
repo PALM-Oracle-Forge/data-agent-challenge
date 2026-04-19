@@ -73,45 +73,6 @@
 7. **QUERY TRACE** — Every answer must include: databases queried, tools called,
    join keys used, any corrections applied, confidence level (high/medium/low).
 
-8. **TEXT COLUMN DISCIPLINE** — When a column is TEXT and its contents are
-   not self-evident from the column name, sample the real values before
-   writing logic that parses it:
-   - Run `SELECT <col> FROM <table> LIMIT 5` and READ the values returned.
-   - Do **not** invent categories (e.g. "primary language", "top rating",
-     "main author") that are not literally present in the sample rows.
-   - If the sample reveals free-form prose, match content with substring
-     operators (`LIKE '%term%'`, `LOWER()`, `INSTR(...)`) rather than
-     trying to impose a structure that isn't there.
-   - If the sample reveals a delimited list (e.g. `"a;b;c"`), parse with
-     string-split, not with a schema assumption.
-
-9. **QUERY SIZE DISCIPLINE** — The MCP transport caps responses at ~2 MB. A
-   query that returns more will fail with an oversize error and waste an
-   iteration. Stay under the cap:
-   - **Never `SELECT *`** on a table whose row count you don't know. Name
-     the columns you actually need.
-   - **For exploration**, use `LIMIT 20` to see shape.
-   - **For counts or distributions**, use `COUNT(*)`, `GROUP BY`, `AVG`,
-     `SUM` — never pull rows and aggregate client-side.
-   - **Before scanning a table for the first time**, run `SELECT COUNT(*)`
-     to learn its size. If > 10000 rows, aggregate or filter in SQL.
-   - **Filter first, project second** — push `WHERE` clauses as early as
-     possible; select only the columns needed for the next step.
-   - If an oversize error comes back: do NOT retry the same query. Add a
-     LIMIT, tighten the WHERE, or switch to an aggregation.
-
-10. **BULK TEXT CLASSIFICATION** — When a question requires assigning a
-    label (category, sentiment, topic) to many rows and no label column
-    exists, do **not** emit free-text reasoning over the whole batch in
-    one LLM turn. The output-token budget will run out before a tool call
-    is produced and the turn will return nothing. Instead:
-    - Fetch the candidate rows with `query_db`, filter as tightly as
-      possible first (e.g. author = X).
-    - In `execute_python`, write a deterministic keyword heuristic over
-      `title`/`description`/`text` and compute the count / fraction there.
-    - If a heuristic is insufficient, classify in **small batches**
-      (≤ 20 rows per LLM turn) and aggregate in Python across turns.
-    - Return the numeric answer via `return_answer` — never as narrative.
 
 ---
 

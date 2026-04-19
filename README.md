@@ -342,4 +342,14 @@ PYTHONPATH=. uv run python scripts/run_bookreview_query.py \
 - [workers/sandbox/README.md](workers/sandbox/README.md)
 - [planning/inception.md](planning/inception.md)
 
+## Current Status
 
+What is working now:
+
+- Query Routing and Self correction
+- MCP-backed Postgres, MongoDB, and SQLite access
+- DuckDB through a separate MCP service
+- sandbox-backed extraction and merge operations
+- DAB-style query export for BookReview
+- typed traces for runtime and benchmark artifacts
+- real shared-server access
