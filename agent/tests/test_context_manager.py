@@ -16,7 +16,13 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from agent.context_manager import ContextManager, _parse_corrections_log
+from agent.context_manager import (
+    ContextManager,
+    _KB_DOMAIN,
+    _REPO_ROOT,
+    _parse_corrections_log,
+    _slice_doc_by_datasets,
+)
 from agent.models.models import (
     ColumnSchema,
     ContextBundle,
@@ -239,10 +245,11 @@ def test_load_layer1_multiple_databases(tmp_path):
 # ── Unit tests: Layer 2 (institutional knowledge) ─────────────────────────────
 
 def test_load_layer2_reads_kb_docs(tmp_path, monkeypatch):
-    """Layer 2 loads all .md files from kb/domain/ and kb/evaluation/."""
+    """Layer 2 loads allowlisted kb/domain/ files plus all kb/evaluation/ .md files."""
     domain_dir = tmp_path / "kb" / "domain"
     domain_dir.mkdir(parents=True)
-    (domain_dir / "test_doc.md").write_text("# Test\nSome content.")
+    # domain_term_definitions.md is on the always-load allowlist
+    (domain_dir / "domain_term_definitions.md").write_text("# Test\nSome content.")
 
     eval_dir = tmp_path / "kb" / "evaluation"
     eval_dir.mkdir(parents=True)
@@ -259,8 +266,8 @@ def test_load_layer2_reads_kb_docs(tmp_path, monkeypatch):
 
     cm = ContextManager(databases={})
     docs = cm._load_layer2()
-    # All kb/domain/ and kb/evaluation/ .md files are loaded at session start,
-    # along with agent/AGENT.md and architecture behavioral docs.
+    # agent/AGENT.md, allowlisted kb/domain/ files, and all kb/evaluation/ .md
+    # files are loaded at session start. kb/architecture/ is NOT loaded.
     assert any("Agent context" in d.content for d in docs)
     assert any("Test" in d.content for d in docs)  # domain doc loaded at session start
 
@@ -287,7 +294,8 @@ def test_load_layer2_document_source_is_set(tmp_path, monkeypatch):
     """Each Document has a non-empty source field."""
     domain_dir = tmp_path / "kb" / "domain"
     domain_dir.mkdir(parents=True)
-    (domain_dir / "biz_terms.md").write_text("# Business terms")
+    # domain_term_definitions.md is on the allowlist
+    (domain_dir / "domain_term_definitions.md").write_text("# Business terms")
     eval_dir = tmp_path / "kb" / "evaluation"
     eval_dir.mkdir(parents=True)
 
@@ -318,6 +326,104 @@ def test_get_docs_for_question_loads_tier_b(tmp_path, monkeypatch):
     docs = cm.get_docs_for_question("What is the revenue?")
     assert len(docs) == 1
     assert "revenue definition" in docs[0].content
+
+
+def test_get_dataset_scoped_docs_slices_real_kb():
+    """Scope to a single dataset and verify only that dataset's section remains."""
+    cm = ContextManager(databases={})
+    # bookreview_db is unique to bookreview; review_database is shared
+    # with googlelocal. Union → both datasets are kept (safe over-inclusion).
+    docs = cm.get_dataset_scoped_docs(["bookreview_db", "review_database"])
+    sources = {d.source for d in docs}
+    assert "kb/domain/schema.md" in sources
+    assert "kb/domain/dataset_overview.md" in sources
+    assert "kb/domain/unstructured_field_inventory.md" in sources
+
+    schema_doc = next(d for d in docs if d.source == "kb/domain/schema.md")
+    # Preamble and global trailing sections survive
+    assert "DAB Full Schema Reference" in schema_doc.content
+    assert "SQL dialect quick notes" in schema_doc.content
+    # bookreview dataset section retained
+    assert "## 8. bookreview" in schema_doc.content
+    # googlelocal also retained because review_database is ambiguous
+    assert "## 2. googlelocal" in schema_doc.content
+    # Unrelated datasets dropped
+    assert "## 1. yelp" not in schema_doc.content
+    assert "## 12. PANCANCER_ATLAS" not in schema_doc.content
+
+
+def test_get_dataset_scoped_docs_unique_db_scopes_tightly():
+    """A db_id unique to one dataset should drop all other dataset sections."""
+    cm = ContextManager(databases={})
+    docs = cm.get_dataset_scoped_docs(["yelp_db"])  # yelp_db is unique to yelp
+    schema_doc = next(d for d in docs if d.source == "kb/domain/schema.md")
+    assert "## 1. yelp" in schema_doc.content
+    assert "## 2. googlelocal" not in schema_doc.content
+    assert "## 8. bookreview" not in schema_doc.content
+
+
+def test_db_to_dataset_map_handles_collisions():
+    """DB ids appearing in multiple datasets must map to all of them."""
+    cm = ContextManager(databases={})
+    m = cm._build_db_to_dataset_map()
+    # review_database appears under both googlelocal and bookreview
+    assert set(m.get("review_database", [])) == {"googlelocal", "bookreview"}
+    # metadata_database appears under both agnews and github_repos
+    assert set(m.get("metadata_database", [])) == {"agnews", "github_repos"}
+    # Unique one stays unique
+    assert m.get("yelp_db") == ["yelp"]
+
+
+def test_get_dataset_scoped_docs_fail_open_on_empty():
+    """Empty input or unknown db id must return the FULL file (no context loss)."""
+    cm = ContextManager(databases={})
+    full_schema = (_KB_DOMAIN / "schema.md").read_text(encoding="utf-8")
+
+    # Empty list → full content
+    docs_empty = cm.get_dataset_scoped_docs([])
+    schema_empty = next(d for d in docs_empty if d.source == "kb/domain/schema.md")
+    assert schema_empty.content == full_schema
+
+    # Unknown db id → no datasets resolve → fail-open to full content
+    docs_unknown = cm.get_dataset_scoped_docs(["nonexistent_db_xyz"])
+    schema_unknown = next(d for d in docs_unknown if d.source == "kb/domain/schema.md")
+    assert schema_unknown.content == full_schema
+
+
+def test_get_dataset_scoped_docs_preserves_all_content_across_datasets():
+    """Sum of per-dataset slices >= full file (every dataset section reachable)."""
+    cm = ContextManager(databases={})
+    db_map = cm._build_db_to_dataset_map()
+    # Group all known db_ids and request them together → should roughly equal full
+    all_dbs = list(db_map.keys())
+    docs = cm.get_dataset_scoped_docs(all_dbs)
+    schema_doc = next(d for d in docs if d.source == "kb/domain/schema.md")
+    full_schema = (_KB_DOMAIN / "schema.md").read_text(encoding="utf-8")
+    # Every known dataset name must still be present in the sliced output
+    all_dataset_names = {name for names in db_map.values() for name in names}
+    for name in all_dataset_names:
+        assert name.lower() in schema_doc.content.lower(), f"lost {name} section"
+    # Size is approximately full (allow for heading reordering artefacts)
+    assert len(schema_doc.content) >= len(full_schema) * 0.95
+
+
+def test_get_docs_for_question_skips_already_loaded(tmp_path, monkeypatch):
+    """Triggered files already in the bundle must not be returned again."""
+    domain_dir = tmp_path / "kb" / "domain"
+    domain_dir.mkdir(parents=True)
+    (domain_dir / "domain_term_definitions.md").write_text("revenue definition")
+
+    import agent.context_manager as cm_module
+    monkeypatch.setattr(cm_module, "_KB_DOMAIN", domain_dir)
+    monkeypatch.setattr(cm_module, "_REPO_ROOT", tmp_path)
+
+    cm = ContextManager(databases={})
+    cm._bundle = _make_bundle(institutional_knowledge=[
+        Document(source="kb/domain/domain_term_definitions.md", content="revenue definition"),
+    ])
+    # 'revenue' triggers domain_term_definitions.md, but it's already in the bundle
+    docs = cm.get_docs_for_question("What is the revenue?")
+    assert docs == []
 
 
 # ── Unit tests: Layer 3 (interaction memory) ──────────────────────────────────
