@@ -29,10 +29,10 @@ from agent.sandbox_client import SandboxClient
 from agent.self_correction import SelfCorrectionLoop
 from eval.harness import EvaluationHarness
 
-load_dotenv()
+load_dotenv(override=True)
 
 # DAB datasets that live in MongoDB (served via HTTP toolbox)
-_MONGODB_DATASETS = {"yelp"}
+_MONGODB_DATASETS = {"yelp", "agnews"}
 
 # DAB datasets that live in PostgreSQL (served via HTTP toolbox)
 _POSTGRES_DATASETS = set()
@@ -471,12 +471,24 @@ class OracleForgeAgent:
         prior_corrections = self._ctx_manager.get_similar_corrections(question)
         correction_applied_proactively = len(prior_corrections) > 0
 
+        # Layer 2 dataset-scoped: inject per-dataset slices of the large KB
+        # files (schema.md, dataset_overview.md, unstructured_field_inventory.md).
+        # These are NOT in _DOMAIN_ALWAYS_LOAD; they're built here for each query.
+        scoped_docs = self._ctx_manager.get_dataset_scoped_docs(available_databases)
+
         # Layer 2 on-demand: inject domain docs triggered by question keywords.
+        # Pass scoped sources to avoid re-injecting a file we've just scoped.
         on_demand_docs = self._ctx_manager.get_docs_for_question(question)
-        if on_demand_docs:
+
+        injected = scoped_docs + on_demand_docs
+        if injected:
+            injected_sources = {d.source for d in injected}
             context = _dc_replace(
                 context,
-                institutional_knowledge=context.institutional_knowledge + on_demand_docs,
+                institutional_knowledge=[
+                    d for d in context.institutional_knowledge
+                    if d.source not in injected_sources
+                ] + injected,
             )
 
         # ── Agentic mode (default): LLM drives every step ──────────────────
@@ -677,6 +689,7 @@ class OracleForgeAgent:
             "correction_applied": correction_applied_proactively,
             "terminate_reason": result.terminate_reason,
             "iterations": result.iterations,
+            "usage": result.total_usage,
         }
 
     # ── Answer synthesis (task 10.2) ──────────────────────────────────────────
