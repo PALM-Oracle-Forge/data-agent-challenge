@@ -30,13 +30,20 @@ import argparse
 import json
 import sys
 import time
-from datetime import datetime
+import urllib.error
+import urllib.request
 from pathlib import Path
 from typing import Any, Dict, List
 
 ROOT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT_DIR))
-
+from utils.dab_output import (
+    next_query_dir,
+    ensure_query_artifacts,
+    ensure_run_dir,
+    write_dab_style_run,
+    write_summary,
+)
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -48,70 +55,18 @@ KB_DATASET_OVERVIEW = ROOT_DIR / "kb" / "domain" / "dataset_overview.md"
 MCP_TOOLS_YAML = ROOT_DIR / "mcp" / "tools.yaml"
 RUNS_ROOT = ROOT_DIR / "runs"
 
+# Canonical DB type names as understood by the agent
+_TYPE_MAP: Dict[str, str] = {
+    "postgresql": "postgres",
+    "postgres": "postgres",
+    "mongodb": "mongodb",
+    "sqlite": "sqlite",
+    "duckdb": "duckdb",
+}
 
-def _load_question(query_dir: Path) -> str:
-    raw = (query_dir / "query.json").read_text(encoding="utf-8").strip()
-    try:
-        payload = json.loads(raw)
-    except json.JSONDecodeError:
-        return raw
-    if isinstance(payload, str):
-        return payload
-    if isinstance(payload, dict) and "query" in payload:
-        return payload["query"]
-    return raw
-
-
-def _select_query_dirs(dataset_root: Path, query: str | None, all_queries: bool) -> List[Path]:
-    if all_queries:
-        dirs = sorted(p for p in dataset_root.iterdir() if p.is_dir() and p.name.startswith("query"))
-        if not dirs:
-            raise SystemExit(f"No query directories under {dataset_root}")
-        return dirs
-    if not query:
-        raise SystemExit("Specify either --query <query_name> or --all.")
-    qdir = dataset_root / query
-    if not qdir.is_dir():
-        raise SystemExit(f"Query dir not found: {qdir}")
-    return [qdir]
-
-
-def _write_final_agent(
-    *,
-    log_dir: Path,
-    query_dir: Path,
-    question: str,
-    result: Dict[str, Any],
-    messages: List[Dict[str, Any]],
-    model: str,
-    max_iterations: int,
-    run_start: float,
-    run_end: float,
-) -> Path:
-    """Write a DAB-shaped final_agent.json into log_dir."""
-    final_payload = {
-        "timestamp": datetime.now().strftime("%Y%m%d_%H%M%S"),
-        "start_time": run_start,
-        "end_time": run_end,
-        "duration": run_end - run_start,
-        "final_result": result.get("answer", ""),
-        "terminate_reason": result.get("terminate_reason"),
-        "messages": messages,
-        "result_storage": {},
-        "llm_call_count": result.get("iterations"),
-        "tools": {},
-        "query_dir": str(query_dir),
-        "question": question,
-        "max_iterations": max_iterations,
-        "deployment_name": model,
-        "llm_log_path": str(log_dir / "llm_calls.jsonl"),
-        "tool_log_path": str(log_dir / "tool_calls.jsonl"),
-        "total_usage": result.get("usage", {}),
-        "confidence": result.get("confidence"),
-    }
-    path = log_dir / "final_agent.json"
-    path.write_text(json.dumps(final_payload, indent=2, default=str), encoding="utf-8")
-    return path
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 
 def main() -> None:
@@ -120,14 +75,57 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("--dataset", required=True, help="DAB dataset name (e.g. agnews).")
-    parser.add_argument("--query", help="Query name under runs/<dataset>/ (e.g. query1).")
-    parser.add_argument("--all", action="store_true", help="Run all queries in the dataset.")
-    parser.add_argument("--root_name", default="run_0", help="Run directory name (default: run_0).")
-    parser.add_argument("--iterations", type=int, default=30, help="Max LLM iterations (default: 30).")
-    parser.add_argument("--databases", nargs="+", metavar="DB_ID", default=None, help="Override KB-derived DB list.")
-    parser.add_argument("--use_hints", action="store_true", help="Inject db_description_with_hint.txt if present.")
-    parser.add_argument("--force", action="store_true", help="Overwrite an existing logs/data_agent/<root_name>/ dir.")
+    parser.add_argument(
+        "--dataset",
+        required=True,
+        help="DAB dataset name (e.g. googlelocal, bookreview, yelp).",
+    )
+    parser.add_argument(
+        "--query",
+        required=False,
+        help="Path to a JSON file containing the natural-language question string.",
+    )
+    parser.add_argument(
+        "--query_dir",
+        required=False,
+        help="Path to a directory containing natural-language question string JSON files (e.g. query/bookreview/). Will execute all JSON files inside.",
+    )
+    parser.add_argument(
+        "--use_hints",
+        action="store_true",
+        help="Search for db_description_with_hint.txt next to query files and use it as domain hints.",
+    )
+    parser.add_argument(
+        "--iterations",
+        type=int,
+        default=20,
+        metavar="N",
+        help=(
+            "Maximum number of LLM tool-call iterations the agentic loop "
+            "is allowed to make per question (default: 20). "
+            "Higher values allow more exploration for complex questions."
+        ),
+    )
+    parser.add_argument(
+        "--root_name",
+        default="run",
+        help="Prefix for per-run log files inside logs/ (default: run).",
+    )
+    parser.add_argument(
+        "--output_dir",
+        default="results",
+        help="Root directory for result folders (default: results/).",
+    )
+    parser.add_argument(
+        "--databases",
+        nargs="+",
+        metavar="DB_ID",
+        default=None,
+        help=(
+            "Override the KB-derived database list.  "
+            "Specify logical DB IDs, e.g. --databases review_database business_database"
+        ),
+    )
     args = parser.parse_args()
 
     dataset_root = RUNS_ROOT / args.dataset
@@ -157,17 +155,39 @@ def main() -> None:
     db_configs = config_mgr.build_db_configs_from_env(
         databases_info, dataset_name=args.dataset.lower()
     )
+    # validate_runtime_dependencies(databases_info, db_configs)  # TODO: Implement if needed
 
     print(f"Dataset      : {args.dataset}")
     print(f"Databases    : {db_ids}")
-    print(f"Queries      : {[q.name for q in query_dirs]}")
-    print(f"Max iters    : {args.iterations}")
-    print(f"Root name    : {args.root_name}")
+    print(
+        f"DB configs   : {list(db_configs.keys()) or '(agent will auto-discover)'}"
+    )
+    print(f"Max iters    : {args.iterations}  (agentic loop LLM steps)")
+    print(f"Output prefix: {args.root_name}")
+    print(f"Batched runs : {len(queries)} queries found.")
+    print(f"Iterations   : {args.iterations}")
+    print(f"Log prefix    : {args.root_name}")
     print()
 
-    agent = OracleForgeAgent(db_configs=db_configs or None, max_iterations=args.iterations)
-    model = getattr(agent._client, "_openrouter_model", "unknown")
+    # ------------------------------------------------------------------
+    # 5. Prepare output directory using query-centered layout
+    # ------------------------------------------------------------------
+    # DAB-style output root
+    dataset_dir = Path(args.output_dir) / f"query_{args.dataset}"
+    dataset_dir.mkdir(parents=True, exist_ok=True)
+    target_query_dir = next_query_dir(dataset_dir)
 
+    # copy query.json + validate.py + ground_truth.csv if present
+    if queries:
+        ensure_query_artifacts(target_query_dir, queries[0])
+    # ------------------------------------------------------------------
+    # 6. Run logic in try/finally
+    # ------------------------------------------------------------------
+    agent = OracleForgeAgent(
+        db_configs=db_configs or None,
+        max_iterations=args.iterations,
+    )
+    
     try:
         for idx, qdir in enumerate(query_dirs, 1):
             print(f"--- ({idx}/{len(query_dirs)}) {args.dataset}/{qdir.name}")
@@ -202,24 +222,80 @@ def main() -> None:
                     "log_dir": log_dir,
                 }
             )
-            run_end = time.time()
+            run_name = args.root_name if len(queries) == 1 else f"{args.root_name}_{q_path.stem}"
 
-            messages = getattr(agent, "_last_messages", [])
-            _write_final_agent(
-                log_dir=log_dir,
-                query_dir=qdir,
-                question=question,
-                result=result,
-                messages=messages,
-                model=model,
-                max_iterations=args.iterations,
-                run_start=run_start,
-                run_end=run_end,
+            per_query_dir = target_query_dir if len(queries) == 1 else (target_query_dir / q_path.stem)
+            per_query_dir.mkdir(parents=True, exist_ok=True)
+            if len(queries) > 1:
+                ensure_query_artifacts(per_query_dir, q_path)
+
+            run_dir = ensure_run_dir(per_query_dir, run_name)
+
+            # these stay empty until OracleForgeAgent exposes them
+            llm_calls = getattr(agent, "llm_calls", [])
+            tool_calls = getattr(agent, "tool_calls", [])
+
+            write_dab_style_run(
+                run_dir,
+                result,
+                llm_calls=llm_calls,
+                tool_calls=tool_calls,
             )
+            elapsed = round(time.perf_counter() - t0, 3)
+            print(f"Finished in {elapsed}s")
 
-            print(f"  answer  : {result.get('answer')}")
-            print(f"  stopped : {result.get('terminate_reason')} after {result.get('iterations')} iter")
-            print(f"  logs    : {log_dir}\n")
+            # Attach metadata
+            result["_meta"] = {
+                "dataset": args.dataset,
+                "databases": db_ids,
+                "question": question,
+                "elapsed_seconds": elapsed,
+                "max_iterations": args.iterations,
+                "iterations_used": result.get("iterations"),
+                "terminate_reason": result.get("terminate_reason"),
+            }
+            
+            # ------------------------------------------------------------------
+            # 8. Print final answer
+            # ------------------------------------------------------------------
+            print(f"Answer       : {result.get('answer')}")
+            print(f"Confidence   : {result.get('confidence')}")
+            print(f"Iterations   : {result.get('iterations')} / {args.iterations}")
+            print(f"Stopped      : {result.get('terminate_reason')}\n")
+
+        summary_path = write_summary(
+            target_query_dir=target_query_dir,
+            root_name=args.root_name,
+            dataset=args.dataset,
+            db_ids=db_ids,
+            question=str(question),
+            iterations=len(queries),
+            all_results=[],
+            output_root=Path(args.output_dir),
+        )
+        print(f"Summary written to {summary_path}")
+        
+        # ------------------------------------------------------------------
+        # 7. Write summary file
+        # ------------------------------------------------------------------
+        all_results = []  # Initialize empty results list for single query run
+        summary_path = per_query_dir / f"{args.root_name}_summary.json"
+        summary = {
+            "dataset": args.dataset,
+            "databases": db_ids,
+            "question": question,
+            "query_file": str((per_query_dir / "query.json").relative_to(Path(args.output_dir))),
+            "iterations": args.iterations,
+            "results": all_results,
+        }
+        summary_path.write_text(
+            json.dumps(summary, indent=2, default=str), encoding="utf-8"
+        )
+        print(f"\nSummary written to {summary_path}")
+
+    except Exception as e:
+        print(f"Error during execution: {e}")
+        raise
     finally:
         print("cleanup...")
         agent.end_session()

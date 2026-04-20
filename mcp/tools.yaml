@@ -1,8 +1,8 @@
 sources:
   postgres_main:
     kind: postgres
-    host: 127.0.0.1
-    port: 55432
+    host: team-dab-postgres
+    port: 5435
     database: bookreview_db
     user: postgres
     password: teampalm
@@ -90,6 +90,28 @@ sources:
   sqlite_deps_dev_package:
     kind: sqlite
     database: /DataAgentBench/query_DEPS_DEV_V1/query_dataset/package_query.db
+
+  # Additional SQLite sources for new databases
+  sqlite_patents:
+    kind: sqlite
+    database: /datasets/query_PATENTS/query_dataset/patents_query.db
+
+  # PostgreSQL sources for new databases
+  postgres_business:
+    kind: postgres
+    host: team-dab-postgres
+    port: 5435
+    database: business_database
+    user: postgres
+    password: teampalm
+
+  postgres_clinical:
+    kind: postgres
+    host: team-dab-postgres
+    port: 5435
+    database: clinical_database
+    user: postgres
+    password: teampalm
 
 tools:
   list_tables:
@@ -225,35 +247,21 @@ tools:
     source: sqlite_crm_territory
     description: Execute SQL against the CRM Arena Pro territory SQLite database.
 
-  sqlite_github_repos_metadata_query:
+  # Tools for new databases
+  sqlite_patents_query:
     kind: sqlite-execute-sql
-    source: sqlite_github_repos_metadata
-    description: Execute SQL against the GitHub Repos SQLite metadata database.
+    source: sqlite_patents
+    description: Execute SQL against the Patents SQLite database.
 
-  sqlite_stockinfo_query:
-    kind: sqlite-execute-sql
-    source: sqlite_stockinfo
-    description: Execute SQL against the stockinfo SQLite database.
+  run_business_query:
+    kind: postgres-execute-sql
+    source: postgres_business
+    description: Execute an arbitrary SQL query against the Business Database.
 
-  sqlite_music_brainz_tracks_query:
-    kind: sqlite-execute-sql
-    source: sqlite_music_brainz_tracks
-    description: Execute SQL against the music brainz tracks SQLite database.
-
-  sqlite_stockindex_info_query:
-    kind: sqlite-execute-sql
-    source: sqlite_stockindex_info
-    description: Execute SQL against the stockindex info SQLite database.
-
-  sqlite_patents_publication_query:
-    kind: sqlite-execute-sql
-    source: sqlite_patents_publication
-    description: Execute SQL against the patents publication SQLite database.
-
-  sqlite_deps_dev_package_query:
-    kind: sqlite-execute-sql
-    source: sqlite_deps_dev_package
-    description: Execute SQL against the deps dev package SQLite database.
+  run_clinical_query:
+    kind: postgres-execute-sql
+    source: postgres_clinical
+    description: Execute an arbitrary SQL query against the Clinical Database.
 
 toolsets:
   oracle_forge:
@@ -275,13 +283,6 @@ toolsets:
       - sqlite_crm_core_query
       - sqlite_crm_products_query
       - sqlite_crm_territory_query
-      - sqlite_github_repos_metadata_query
-      - sqlite_stockinfo_query
-      - sqlite_music_brainz_tracks_query
-      - sqlite_stockindex_info_query
-      - sqlite_patents_publication_query
-      - sqlite_deps_dev_package_query
-      - sqlite_music_brainz_tracks_query
-      - sqlite_stockindex_info_query
-      - sqlite_patents_publication_query
-      - sqlite_deps_dev_package_query
+      - sqlite_patents_query
+      - run_business_query
+      - run_clinical_query
