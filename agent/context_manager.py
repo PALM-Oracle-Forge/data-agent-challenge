@@ -39,7 +39,7 @@ from utils.schema_introspector import introspect_schema
 # Paths relative to repo root
 _REPO_ROOT = Path(__file__).parent.parent
 _KB_DOMAIN = _REPO_ROOT / "kb" / "domain"
-_KB_EVALUATION = _REPO_ROOT / "kb" / "evaluation"
+# _KB_EVALUATION = _REPO_ROOT / "kb" / "evaluation"
 _CORRECTIONS_LOG = _REPO_ROOT / "kb" / "corrections" / "corrections_log.md"
 _AGENT_MD = _REPO_ROOT / "agent" / "AGENT.md"
 
@@ -466,9 +466,9 @@ class ContextManager:
         # 2. kb/domain/ — explicit allowlist
         explicit_files.extend(_KB_DOMAIN / name for name in _DOMAIN_ALWAYS_LOAD)
 
-        # 3. All .md files from kb/evaluation/
-        if _KB_EVALUATION.is_dir():
-            explicit_files.extend(sorted(_KB_EVALUATION.glob("*.md")))
+        # # 3. All .md files from kb/evaluation/
+        # if _KB_EVALUATION.is_dir():
+        #     explicit_files.extend(sorted(_KB_EVALUATION.glob("*.md")))
 
         # Deduplicate (in case of overlaps) while preserving order
         seen_paths: set = set()

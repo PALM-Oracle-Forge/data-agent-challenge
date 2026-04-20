@@ -90,13 +90,20 @@ class MCPToolbox:
             "sqlite_crm_core_query": "sqlite",
             "sqlite_crm_products_query": "sqlite",
             "sqlite_crm_territory_query": "sqlite",
+            "sqlite_stockinfo_query": "sqlite",
+            "sqlite_music_brainz_tracks_query": "sqlite",
+            "sqlite_stockindex_info_query": "sqlite",
+            "sqlite_patents_publication_query": "sqlite",
+            "sqlite_deps_dev_package_query": "sqlite",
             "duckdb_query": "duckdb",
             "duckdb_crm_activities_query": "duckdb",
             "duckdb_crm_sales_pipeline_query": "duckdb",
             "duckdb_deps_dev_v1_query": "duckdb",
             "duckdb_github_repos_query": "duckdb",
             "duckdb_music_brainz_query": "duckdb",
+            "duckdb_music_brainz_20k_query": "duckdb",
             "duckdb_pancancer_query": "duckdb",
+            "duckdb_pancancer_atlas_query": "duckdb",
             "duckdb_stockindex_query": "duckdb",
             "duckdb_stockmarket_query": "duckdb",
             "duckdb_yelp_query": "duckdb",
@@ -146,18 +153,29 @@ class MCPToolbox:
 
     def list_tools(self) -> List[Dict[str, Any]]:
         """
-        List all tools registered in the running toolbox binary.
+        List all tools registered in the running toolbox binary and duckdb mcp server.
         """
+        data = []
         try:
             payload = self._post_mcp("tools/list", {})
-            data = payload.get("result", {}).get("tools", [])
-            for tool in data:
-                name = tool.get("name", "")
-                if name:
-                    self._tool_source_map[name] = self._default_source_map.get(name, "")
-            return data
+            data.extend(payload.get("result", {}).get("tools", []))
         except Exception as exc:
-            return [{"error": str(exc)}]
+            pass
+
+        try:
+            duckdb_payload = self._post_mcp("tools/list", {}, base_url=self.duckdb_mcp_url)
+            data.extend(duckdb_payload.get("result", {}).get("tools", []))
+        except Exception as exc:
+            pass
+
+        if not data:
+            return [{"error": "Both toolboxes failed to respond."}]
+
+        for tool in data:
+            name = tool.get("name", "")
+            if name:
+                self._tool_source_map[name] = self._default_source_map.get(name, "")
+        return data
 
     def _call_http(self, tool_name: str, parameters: Dict[str, Any]) -> ToolResult:
         """Send tool invocation to MCP Toolbox HTTP server."""

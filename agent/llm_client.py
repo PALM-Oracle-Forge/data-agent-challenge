@@ -19,6 +19,9 @@ except ImportError:  # pragma: no cover
 OPENROUTER_URL_DEFAULT = "https://openrouter.ai/api/v1"
 OPENROUTER_MODEL_DEFAULT = "gemini-3.1-pro-preview"
 
+GROQ_URL_DEFAULT = "https://api.groq.com/openai/v1"
+GROQ_MODEL_DEFAULT = "llama-3.3-70b-versatile"
+
 
 class LLMResponseContent:
     def __init__(self, text: str):
@@ -83,18 +86,32 @@ class LLMClient:
         self._openrouter_url = os.getenv("OPENROUTER_URL", OPENROUTER_URL_DEFAULT)
         self._openrouter_model = os.getenv("OPENROUTER_MODEL", OPENROUTER_MODEL_DEFAULT)
 
-        if openrouter_api_key:
+        groq_api_key = os.getenv("GROQ_API_KEY", os.getenv("GR0Q_API_KEY", ""))
+        self._groq_url = os.getenv("GROQ_URL", GROQ_URL_DEFAULT)
+        self._groq_model = os.getenv("GROQ_MODEL", GROQ_MODEL_DEFAULT)
+
+        if groq_api_key: groq_api_key = groq_api_key.strip(' "\'')
+        if openrouter_api_key: openrouter_api_key = openrouter_api_key.strip(' "\'')
+
+        backend_override = os.getenv("LLM_BACKEND", "").lower()
+
+        if backend_override == "groq" or (not backend_override and groq_api_key):
+            self._backend = "groq"
+            self._groq_api_key = groq_api_key
+            self._session = httpx.Client(timeout=30.0)
+            self.messages = self
+        elif backend_override == "openrouter" or (not backend_override and openrouter_api_key):
             self._backend = "openrouter"
             self._openrouter_api_key = openrouter_api_key
             self._session = httpx.Client(timeout=30.0)
             self.messages = self
-        elif anthropic is not None:
+        elif anthropic is not None and backend_override in ("anthropic", ""):
             self._backend = "anthropic"
             self._client = anthropic.Anthropic()
             self.messages = self._client.messages
         else:
             raise RuntimeError(
-                "No LLM backend is available. Set OPENROUTER_API_KEY or install anthropic."
+                "No LLM backend is available. Set LLM_BACKEND to groq/openrouter/anthropic with respective keys."
             )
 
     # ── Standard text completion ───────────────────────────────────────────
@@ -108,8 +125,8 @@ class LLMClient:
         system: Optional[str] = None,
         **kwargs: Any,
     ) -> LLMResponse:
-        resolved_model = model or self._openrouter_model
         if self._backend == "anthropic":
+            resolved_model = model or os.getenv("ANTHROPIC_MODEL", "claude-sonnet-4-6")
             response = self._client.messages.create(
                 model=resolved_model,
                 max_tokens=max_tokens,
@@ -119,6 +136,21 @@ class LLMClient:
                 **kwargs,
             )
             return LLMResponse(response.content[0].text)
+        elif self._backend == "groq":
+            resolved_model = model or os.getenv("GROQ_MODEL", self._groq_model)
+            all_messages = []
+            if system:
+                all_messages.append({"role": "system", "content": system})
+            all_messages.extend(messages)
+            return self._create_groq_response(
+                model=resolved_model,
+                messages=all_messages,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                **kwargs,
+            )
+
+        resolved_model = model or os.getenv("OPENROUTER_MODEL", self._openrouter_model)
         return self._create_openrouter_response(
             model=resolved_model,
             messages=messages,
@@ -126,6 +158,52 @@ class LLMClient:
             temperature=temperature,
             **kwargs,
         )
+
+    def _create_groq_response(
+        self,
+        model: str,
+        messages: List[Dict[str, Any]],
+        max_tokens: Optional[int],
+        temperature: float,
+        **kwargs: Any,
+    ) -> LLMResponse:
+        payload: Dict[str, Any] = {
+            "model": model,
+            "messages": messages,
+            "temperature": temperature,
+        }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
+        payload.update(kwargs)
+
+        headers = {
+            "Authorization": f"Bearer {self._groq_api_key}",
+            "Content-Type": "application/json",
+        }
+        url = self._groq_url.rstrip("/") + "/chat/completions"
+        response = self._session.post(url, json=payload, headers=headers)
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            body = response.text.strip()
+            details = body or str(exc)
+            raise RuntimeError(
+                f"Groq request failed for model '{model}' at '{url}': {details}"
+            ) from exc
+        data = response.json()
+
+        choices = data.get("choices") or []
+        if not choices:
+            raise RuntimeError("Groq returned no choices")
+
+        message = choices[0].get("message", {})
+        content = message.get("content", "")
+        if isinstance(content, dict):
+            text = content.get("text") or content.get("type") or ""
+        else:
+            text = str(content)
+
+        return LLMResponse(text)
 
     def _create_openrouter_response(
         self,
@@ -222,6 +300,14 @@ class LLMClient:
                 system=system,
                 enable_caching=enable_caching,
             )
+        elif self._backend == "groq":
+            return self._create_with_tools_groq(
+                messages=messages,
+                tools=tools,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                system=system,
+            )
         return self._create_with_tools_openrouter(
             messages=messages,
             tools=tools,
@@ -273,6 +359,91 @@ class LLMClient:
             stop_reason=response.stop_reason,
             text=" ".join(text_parts).strip(),
             usage=_normalize_usage(getattr(response, "usage", None)),
+        )
+
+    def _create_with_tools_groq(
+        self,
+        messages: List[Dict[str, Any]],
+        tools: List[Dict[str, Any]],
+        max_tokens: int,
+        temperature: float,
+        system: Optional[str],
+    ) -> LLMToolCallResponse:
+        """Groq native tool-calling via the `tools=` JSON field."""
+        openai_tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": t["name"],
+                    "description": t.get("description", ""),
+                    "parameters": t.get("input_schema", {"type": "object", "properties": {}}),
+                },
+            }
+            for t in tools
+        ]
+
+        all_messages: List[Dict[str, Any]] = []
+        if system:
+            all_messages.append({"role": "system", "content": system})
+        all_messages.extend(messages)
+
+        final_model = os.getenv("GROQ_MODEL", self._groq_model)
+        payload: Dict[str, Any] = {
+            "model": final_model,
+            "messages": all_messages,
+            "tools": openai_tools,
+            "tool_choice": "auto",
+            "temperature": temperature,
+            "max_tokens": max_tokens,
+        }
+
+        headers = {
+            "Authorization": f"Bearer {self._groq_api_key}",
+            "Content-Type": "application/json",
+        }
+        url = self._groq_url.rstrip("/") + "/chat/completions"
+        response = self._session.post(url, json=payload, headers=headers)
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            body = response.text.strip()
+            raise RuntimeError(
+                f"Groq tool-call request failed: {body or str(exc)}"
+            ) from exc
+
+        data = response.json()
+        choices = data.get("choices") or []
+        if not choices:
+            err = data.get("error") or data
+            raise RuntimeError(
+                f"Groq returned no choices for tool call "
+                f"(max_tokens={max_tokens}, model={final_model}): {err}"
+            )
+
+        message = choices[0].get("message", {})
+        raw_tool_calls = message.get("tool_calls") or []
+        text = message.get("content") or ""
+
+        tool_calls: List[LLMToolCall] = []
+        for tc in raw_tool_calls:
+            fn = tc.get("function", {})
+            raw_args = fn.get("arguments", "{}")
+            try:
+                args = _json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+            except _json.JSONDecodeError:
+                args = {}
+            tool_calls.append(
+                LLMToolCall(id=tc.get("id", ""), name=fn.get("name", ""), input=args)
+            )
+
+        stop_reason = choices[0].get("finish_reason", "")
+        usage = _normalize_usage(data.get("usage"))
+
+        return LLMToolCallResponse(
+            tool_calls=tool_calls,
+            stop_reason=stop_reason,
+            text=str(text).strip() if text else "",
+            usage=usage,
         )
 
     def _create_with_tools_openrouter(

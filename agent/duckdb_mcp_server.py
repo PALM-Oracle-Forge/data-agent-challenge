@@ -49,13 +49,13 @@ def _tool_registry(root: Path) -> Dict[str, DuckDBTool]:
             description="Execute SQL against the GitHub Repos DuckDB-backed artifacts dataset.",
             database_path=root / "query_GITHUB_REPOS" / "query_dataset" / "repo_artifacts.db",
         ),
-        "duckdb_music_brainz_query": DuckDBTool(
-            name="duckdb_music_brainz_query",
+        "duckdb_music_brainz_20k_query": DuckDBTool(
+            name="duckdb_music_brainz_20k_query",
             description="Execute SQL against the Music Brainz sales DuckDB database.",
             database_path=root / "query_music_brainz_20k" / "query_dataset" / "sales.duckdb",
         ),
-        "duckdb_pancancer_query": DuckDBTool(
-            name="duckdb_pancancer_query",
+        "duckdb_pancancer_atlas_query": DuckDBTool(
+            name="duckdb_pancancer_atlas_query",
             description="Execute SQL against the PANCANCER molecular DuckDB-backed dataset.",
             database_path=root / "query_PANCANCER_ATLAS" / "query_dataset" / "pancancer_molecular.db",
         ),
