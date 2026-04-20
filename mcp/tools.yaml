@@ -71,6 +71,26 @@ sources:
     kind: sqlite
     database: /DataAgentBench/query_GITHUB_REPOS/query_dataset/repo_metadata.db
 
+  sqlite_stockinfo:
+    kind: sqlite
+    database: /DataAgentBench/query_stockmarket/query_dataset/stockinfo_query.db
+
+  sqlite_music_brainz_tracks:
+    kind: sqlite
+    database: /DataAgentBench/query_music_brainz_20k/query_dataset/tracks.db
+
+  sqlite_stockindex_info:
+    kind: sqlite
+    database: /DataAgentBench/query_stockindex/query_dataset/indexInfo_query.db
+
+  sqlite_patents_publication:
+    kind: sqlite
+    database: /DataAgentBench/query_PATENTS/query_dataset/patent_publication.db
+
+  sqlite_deps_dev_package:
+    kind: sqlite
+    database: /DataAgentBench/query_DEPS_DEV_V1/query_dataset/package_query.db
+
 tools:
   list_tables:
     kind: postgres-sql
@@ -210,6 +230,31 @@ tools:
     source: sqlite_github_repos_metadata
     description: Execute SQL against the GitHub Repos SQLite metadata database.
 
+  sqlite_stockinfo_query:
+    kind: sqlite-execute-sql
+    source: sqlite_stockinfo
+    description: Execute SQL against the stockinfo SQLite database.
+
+  sqlite_music_brainz_tracks_query:
+    kind: sqlite-execute-sql
+    source: sqlite_music_brainz_tracks
+    description: Execute SQL against the music brainz tracks SQLite database.
+
+  sqlite_stockindex_info_query:
+    kind: sqlite-execute-sql
+    source: sqlite_stockindex_info
+    description: Execute SQL against the stockindex info SQLite database.
+
+  sqlite_patents_publication_query:
+    kind: sqlite-execute-sql
+    source: sqlite_patents_publication
+    description: Execute SQL against the patents publication SQLite database.
+
+  sqlite_deps_dev_package_query:
+    kind: sqlite-execute-sql
+    source: sqlite_deps_dev_package
+    description: Execute SQL against the deps dev package SQLite database.
+
 toolsets:
   oracle_forge:
     tools:
@@ -231,3 +276,12 @@ toolsets:
       - sqlite_crm_products_query
       - sqlite_crm_territory_query
       - sqlite_github_repos_metadata_query
+      - sqlite_stockinfo_query
+      - sqlite_music_brainz_tracks_query
+      - sqlite_stockindex_info_query
+      - sqlite_patents_publication_query
+      - sqlite_deps_dev_package_query
+      - sqlite_music_brainz_tracks_query
+      - sqlite_stockindex_info_query
+      - sqlite_patents_publication_query
+      - sqlite_deps_dev_package_query

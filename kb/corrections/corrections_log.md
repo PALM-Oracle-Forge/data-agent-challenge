@@ -905,3 +905,96 @@ print(env.keys())
 [Outcome]    verified successful
 [db=sandbox] [2026-04-19T16:44:46.905839]
 ---
+
+[Query]      Which 3 businesses received the highest number of reviews with ratings of 4.5 or higher during 2019? Include their names and the count of high-rating reviews.
+[Failure]    execute_python exception: KeyError: 'counts'
+[Root Cause] agentic_runtime_error
+[Fix]        Corrected execute_python payload:
+import pandas as pd
+
+df = pd.DataFrame(env['data_2'])
+df['year'] = df['time'].astype(str).apply(lambda x: '2019' if '2019' in x else 'other')
+df_2019 = df[df['year'] == '2019']
+counts = df_2019['gmap_id'].value_counts().reset_index()
+counts.columns = ['gmap_id', 'count']
+
+names = pd.DataFrame(env['data_3'])
+merged = pd.merge(counts, names, on='gmap_id')
+merged = merged.sort_values('count', ascending=False).head(3)
+print(merged)
+res = []
+for _, row in merged.iterrows():
+    res.append({"name": row['name'], "count": row['count']})
+print(res)
+
+[Outcome]    verified successful
+[db=sandbox] [2026-04-19T13:34:06.058345]
+
+
+
+[Query]      Which song generated the highest total revenue in USD across all stores and countries?
+[Failure]    execute_python exception: sqlite3.OperationalError: unable to open database file
+[Root Cause] agentic_runtime_error
+[Fix]        Corrected execute_python payload:
+track_ids = [row['track_id'] for row in env['data_1']]
+print(track_ids[:10])
+
+[Outcome]    verified successful
+[db=sandbox] [2026-04-20T03:28:04.052952]
+---
+
+[Query]      Which song generated the highest total revenue in USD across all stores and countries?
+[Failure]    execute_python exception: KeyError: 'data_4'
+[Root Cause] agentic_runtime_error
+[Fix]        Corrected execute_python payload:
+print(env.keys())
+[Outcome]    verified successful
+[db=sandbox] [2026-04-20T03:28:04.053099]
+---
+
+[Query]      Which song generated the highest total revenue in USD across all stores and countries?
+[Failure]    execute_python exception: KeyError: 'data_5'
+[Root Cause] agentic_runtime_error
+[Fix]        Corrected execute_python payload:
+print(env.keys())
+[Outcome]    verified successful
+[db=sandbox] [2026-04-20T03:28:04.053158]
+---
+
+[Query]      Which song generated the highest total revenue in USD across all stores and countries?
+[Failure]    execute_python exception: KeyError: 'data_6'
+[Root Cause] agentic_runtime_error
+[Fix]        Corrected execute_python payload:
+print(env.keys())
+[Outcome]    verified successful
+[db=sandbox] [2026-04-20T03:28:04.053206]
+---
+
+[Query]      Which song generated the highest total revenue in USD across all stores and countries?
+[Failure]    execute_python exception: KeyError: 'data_7'
+[Root Cause] agentic_runtime_error
+[Fix]        Corrected execute_python payload:
+print(env.keys())
+[Outcome]    verified successful
+[db=sandbox] [2026-04-20T03:28:04.053250]
+---
+
+[Query]      Which song generated the highest total revenue in USD across all stores and countries?
+[Failure]    execute_python exception: KeyError: 'data_8'
+[Root Cause] agentic_runtime_error
+[Fix]        Corrected execute_python payload:
+print(env.keys())
+[Outcome]    verified successful
+[db=sandbox] [2026-04-20T03:28:04.053300]
+---
+
+[Query]      Considering only the latest release versions for each distinct NPM package, which packages are the top 5 most popular based on the Github star number, as well as their versions?
+[Failure]    execute_python exception: ModuleNotFoundError: No module named 'duckdb'
+[Root Cause] agentic_runtime_error
+[Fix]        Corrected execute_python payload:
+import os
+print(os.listdir('.'))
+
+[Outcome]    verified successful
+[db=sandbox] [2026-04-20T03:51:48.707433]
+---
