@@ -26,3 +26,4 @@ query/
 
 agent_server.log
 agent_server.pid
+bin/toolbox.bin

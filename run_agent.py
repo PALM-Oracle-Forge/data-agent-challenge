@@ -1,45 +1,39 @@
 #!/usr/bin/env python3
-"""Run any DAB dataset query through the Oracle Forge agent (agentic mode).
+"""Run Oracle Forge against our local DAB mirror under `runs/<dataset>/<query>/`.
 
-Reads the KB (kb/domain/dataset_overview.md) to discover database names and
-types for the requested dataset, then runs one agentic query with up to
---iterations LLM tool-call steps.
+Folder layout (DAB-compatible):
+
+    runs/<dataset>/<query_name>/
+        query.json           (scaffolded from DAB)
+        ground_truth.csv
+        validate.py
+        logs/data_agent/<root_name>/
+            final_agent.json
+            llm_calls.jsonl
+            tool_calls.jsonl
 
 Usage:
-    python run_agent.py \\
-        --dataset googlelocal \\
-        --query query/googlelocal/query.json \\
-        --iterations 20 \\
-        --root_name run_0
+    # Run one query
+    python run_agent.py --dataset agnews --query query1 --root_name run_0
 
-    # Override databases discovered from KB
-    python run_agent.py \\
-        --dataset bookreview \\
-        --query query/bookreview/query.json \\
-        --databases books_database review_database \\
-        --root_name run_0
+    # Run every query in a dataset
+    python run_agent.py --dataset agnews --all --root_name run_0
 
-Connection strings are read from env vars using the pattern:
-    {DB_ID_UPPER}_DB_TYPE   — sqlite | duckdb | postgres | mongodb
-    {DB_ID_UPPER}_DB_CONN   — connection string (postgres/mongodb) or file path
-    {DB_ID_UPPER}_DB_PATH   — file path (sqlite/duckdb, preferred over _DB_CONN)
-
-Unset databases fall back to OracleForgeAgent’s auto-discovery (DAB directory
-structure + known dataset defaults).
+    # Override databases
+    python run_agent.py --dataset bookreview --query query1 --root_name run_0 \\
+        --databases books_database review_database
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
-import re
 import sys
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List
 
 ROOT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT_DIR))
@@ -59,6 +53,7 @@ from agent.oracle_forge_agent import OracleForgeAgent
 
 KB_DATASET_OVERVIEW = ROOT_DIR / "kb" / "domain" / "dataset_overview.md"
 MCP_TOOLS_YAML = ROOT_DIR / "mcp" / "tools.yaml"
+RUNS_ROOT = ROOT_DIR / "runs"
 
 # Canonical DB type names as understood by the agent
 _TYPE_MAP: Dict[str, str] = {
@@ -76,11 +71,7 @@ _TYPE_MAP: Dict[str, str] = {
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description=(
-            "Run a natural-language query against any DAB dataset via the "
-            "Oracle Forge agent.  Database names and types are looked up "
-            "automatically from kb/domain/dataset_overview.md."
-        ),
+        description=__doc__.splitlines()[0],
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -137,51 +128,35 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    queries = []
-    if args.query:
-        queries.append(Path(args.query))
-    if args.query_dir:
-        queries.extend(sorted(Path(args.query_dir).rglob("*.json")))
-        
-    if not queries:
-        raise SystemExit("Error: either --query or --query_dir must be provided.")
+    dataset_root = RUNS_ROOT / args.dataset
+    if not dataset_root.is_dir():
+        raise SystemExit(
+            f"Dataset not scaffolded: {dataset_root}\n"
+            f"Run: python scripts/scaffold_bench.py --dataset {args.dataset}"
+        )
+
+    query_dirs = _select_query_dirs(dataset_root, args.query, args.all)
 
     config_mgr = ConfigManager(KB_DATASET_OVERVIEW, MCP_TOOLS_YAML)
-
-    # ------------------------------------------------------------------
-    # 2. Resolve databases from KB (or CLI override)
-    # ------------------------------------------------------------------
     if args.databases:
         databases_info = [{"db_id": db_id, "db_type": ""} for db_id in args.databases]
         db_ids = args.databases
     else:
-        if not KB_DATASET_OVERVIEW.exists():
-            raise SystemExit(
-                f"Error: KB file not found: {KB_DATASET_OVERVIEW}\n"
-                "Use --databases to specify database IDs explicitly."
-            )
         registry = config_mgr.parse_kb_dataset_registry()
-        dataset_key = args.dataset.lower()
-        if dataset_key not in registry:
+        key = args.dataset.lower()
+        if key not in registry:
             raise SystemExit(
-                f"Error: dataset '{args.dataset}' not found in KB.\n"
-                f"Known datasets: {', '.join(sorted(registry.keys()))}\n"
-                "Use --databases to override."
+                f"Dataset '{args.dataset}' not in KB registry.\n"
+                f"Known: {sorted(registry.keys())}\nUse --databases to override."
             )
-        databases_info = registry[dataset_key]
+        databases_info = registry[key]
         db_ids = [d["db_id"] for d in databases_info]
 
-    # ------------------------------------------------------------------
-    # 3. Build explicit db_configs from env vars / mcp/tools.yaml
-    # ------------------------------------------------------------------
     db_configs = config_mgr.build_db_configs_from_env(
         databases_info, dataset_name=args.dataset.lower()
     )
     # validate_runtime_dependencies(databases_info, db_configs)  # TODO: Implement if needed
 
-    # ------------------------------------------------------------------
-    # 4. Print run summary header
-    # ------------------------------------------------------------------
     print(f"Dataset      : {args.dataset}")
     print(f"Databases    : {db_ids}")
     print(
@@ -214,38 +189,37 @@ def main() -> None:
     )
     
     try:
-        for idx, q_path in enumerate(queries, 1):
-            print(f"--- Running Query {idx}/{len(queries)}: {q_path.name}")
-            
-            raw = q_path.read_text(encoding="utf-8").strip()
-            try:
-                question = json.loads(raw)
-            except json.JSONDecodeError:
-                question = raw
+        for idx, qdir in enumerate(query_dirs, 1):
+            print(f"--- ({idx}/{len(query_dirs)}) {args.dataset}/{qdir.name}")
+            question = _load_question(qdir)
+
+            log_dir = qdir / "logs" / "data_agent" / args.root_name
+            if log_dir.exists():
+                if not args.force:
+                    print(f"  SKIP: {log_dir} already exists (use --force to overwrite)\n")
+                    continue
+                # Remove old logs; mirrors DAB's assert-not-exists contract once cleared
+                for f in ("final_agent.json", "llm_calls.jsonl", "tool_calls.jsonl"):
+                    (log_dir / f).unlink(missing_ok=True)
+            log_dir.mkdir(parents=True, exist_ok=True)
 
             hints_text = ""
             if args.use_hints:
-                # Look for hint file next to query.json or in the parent dirs if we are batching
-                hint_file = q_path.parent / "db_description_with_hint.txt"
-                if hint_file.exists():
-                    hints_text = hint_file.read_text(encoding="utf-8")
-                else:
-                    hint_file2 = q_path.parent / "db_description_withhint.txt"
-                    if hint_file2.exists():
-                        hints_text = hint_file2.read_text(encoding="utf-8")
-            
-            print(f"Question     : {question}")
-            if hints_text:
-                print("Hints matched: YES")
+                for fname in ("db_description_with_hint.txt", "db_description_withhint.txt"):
+                    hint_file = qdir / fname
+                    if hint_file.exists():
+                        hints_text = hint_file.read_text(encoding="utf-8")
+                        break
 
-            t0 = time.perf_counter()
-
+            print(f"  question: {question!r}")
+            run_start = time.time()
             result = agent.answer(
                 {
                     "question": question,
                     "available_databases": db_ids,
                     "schema_info": {},
                     "hints": hints_text,
+                    "log_dir": log_dir,
                 }
             )
             run_name = args.root_name if len(queries) == 1 else f"{args.root_name}_{q_path.stem}"
@@ -323,7 +297,7 @@ def main() -> None:
         print(f"Error during execution: {e}")
         raise
     finally:
-        print("Executing cleanup operations...")
+        print("cleanup...")
         agent.end_session()
 
 

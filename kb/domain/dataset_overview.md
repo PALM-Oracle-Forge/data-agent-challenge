@@ -132,10 +132,12 @@ Each dataset entry describes: databases, types, join mechanism, and primary chal
 |---|---|---|
 | core_crm | SQLite | User, Account, Contact |
 | sales_pipeline | DuckDB | Contract, Lead, Opportunity, OpportunityLineItem, Quote, QuoteLineItem |
-| product_catalog | (see full db_description) | Product2, PricebookEntry, Pricebook2 |
-| support_tickets | (see full db_description) | Case, CaseComment |
-| email_database | (see full db_description) | EmailMessage |
-| knowledge_base | (see full db_description) | Knowledge__kav |
+| activities | DuckDB | Activity records (calls, tasks, events) |
+| product_catalog | SQLite | Product2, PricebookEntry, Pricebook2, ProductCategory, Order, OrderItem |
+| territory | SQLite | Territory2, UserTerritory2Association |
+| support_tickets | PostgreSQL (crm_support) | Case, CaseHistory__c, Issue__c, LiveChatTranscript |
+| email_database | PostgreSQL (crm_support) | EmailMessage — same DB as support_tickets |
+| knowledge_base | PostgreSQL (crm_support) | Knowledge__kav — same DB as support_tickets |
 
 **Join key:** `Id` fields link across tables (AccountId, ContactId, OwnerId, OpportunityId, etc.). **WARNING: ~25% of Id-like fields include a leading `#` character** (e.g., `#001Wt00000PFj4zIAD` instead of `001Wt00000PFj4zIAD`). Strip `#` before joining.
 
