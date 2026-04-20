@@ -10,8 +10,10 @@ Team: `PaLM`
 | --- | --- | --- |
 | Bethel Yohannes | Lead Architect | Agent integration, MCP setup, repository structure |
 | Yosef Zewdu | Infrastructure Engineer | Database setup, environment configuration |
-| Estifanos Teklay | Knowledge Engineer | Knowledge base and context layers |
-| Melkam Berhane | Knowledge Engineer | Domain knowledge and validation |
+| Estifanos Teklay | Intellgence Officer | Knowledge base and context layers |
+| Melkam Berhane | Intellegence officer| Domain knowledge and validation |
+| Kidus Tewodros | Signa corps | external world engagment |
+| Melkam Berhane | Signa corps | external world engagment |
 
 ## Architecture Overview
 
