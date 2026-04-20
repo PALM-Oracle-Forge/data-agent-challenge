@@ -12,8 +12,8 @@ Team: `PaLM`
 | Yosef Zewdu | Infrastructure Engineer | Database setup, environment configuration |
 | Estifanos Teklay | Intellgence Officer | Knowledge base and context layers |
 | Melkam Berhane | Intellegence officer| Domain knowledge and validation |
-| Kidus Tewodros | Signa corps | external world engagment |
-| Melkam Berhane | Signa corps | external world engagment |
+| Kidus Tewodros | Signal corps | external world engagment |
+| Melkam Berhane | Signal corps | external world engagment |
 
 ## Architecture Overview
 
